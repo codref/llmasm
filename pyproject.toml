@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "llmasm"
 version = "0.1.0"
 description = "Local LLM orchestration with persistent graph memory"
-readme = "docs/llmasm-rfc.md"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "pydantic>=2",
