@@ -1,0 +1,34 @@
+services:
+  postgres:
+    build:
+      context: ./docker/postgres
+      args:
+        AGE_REF: ${AGE_REF:-PG16}
+    container_name: llmasm-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-llmasm}
+      POSTGRES_USER: ${POSTGRES_USER:-llmasm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-llmasm}
+    ports:
+      - "${POSTGRES_PORT:-15432}:5432"
+    volumes:
+      - llmasm-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  graph-viewer:
+    build:
+      context: ./docker/graph-viewer
+    container_name: llmasm-graph-viewer
+    ports:
+      - "${GRAPH_VIEWER_PORT:-3000}:3000"
+    environment:
+      GRAPH_VIEWER_DATA: /app/data/graph.json
+    volumes:
+      - ./docker/graph-viewer/data:/app/data:ro
+
+volumes:
+  llmasm-postgres-data:

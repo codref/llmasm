@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LLMASM Graph Viewer</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="toolbar">
+        <div class="title-block">
+          <h1>LLMASM Graph Viewer</h1>
+          <p id="run-meta">Loading graph...</p>
+        </div>
+        <div class="toolbar-actions">
+          <button id="fit-btn" type="button" title="Fit graph">Fit</button>
+          <button id="reload-btn" type="button" title="Reload graph">Reload</button>
+        </div>
+      </header>
+      <section class="content">
+        <aside class="sidebar">
+          <div class="filter-row">
+            <label for="kind-filter">Kind</label>
+            <select id="kind-filter">
+              <option value="all">All</option>
+            </select>
+          </div>
+          <div class="legend" id="legend"></div>
+          <div class="stats" id="stats"></div>
+        </aside>
+        <section class="stage" aria-label="Graph canvas">
+          <svg id="graph" role="img" aria-label="LLMASM task graph"></svg>
+        </section>
+        <aside class="inspector">
+          <h2>Selection</h2>
+          <div id="inspector-body" class="inspector-body">Select a node or edge.</div>
+        </aside>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

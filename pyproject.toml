@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llmasm"
+version = "0.1.0"
+description = "Local LLM orchestration with persistent graph memory"
+readme = "docs/llmasm-rfc.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2",
+  "psycopg[binary]>=3",
+  "httpx>=0.25",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "pytest-cov",
+  "ruff",
+  "mypy",
+]
+
+[tool.setuptools.packages.find]
+include = ["llmasm*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "integration: tests requiring external services",
+  "ollama: tests requiring Ollama",
+  "postgres: tests requiring Postgres",
+  "pgvector: tests requiring pgvector",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["llmasm"]

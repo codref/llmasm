@@ -1,0 +1,338 @@
+{
+  "metadata": {
+    "workspace_id": "workspace_1f57cf6a4cdb4735ab02f5360cc340ab",
+    "workspace_name": "hotpot-followup-demo",
+    "task_graph_id": "conversation-demo",
+    "run_id": "multi-run",
+    "run_status": "succeeded",
+    "turns": 2
+  },
+  "nodes": [
+    {
+      "id": "node_17e86497f14d41e2a24dacf7ad4f905d",
+      "label": "intent_1",
+      "kind": "intent",
+      "status": "succeeded",
+      "subtitle": "",
+      "schema": {
+        "input": null,
+        "output": "RawText"
+      },
+      "metrics": {
+        "attempts": 1,
+        "artifacts": 1
+      },
+      "metadata": {
+        "output": {
+          "text": "What science fantasy young adult series, told in first person, has a set of companion books narrating the stories of enslaved worlds and alien species?"
+        },
+        "proposal_name": "intent_1",
+        "conversation_turn": 1
+      }
+    },
+    {
+      "id": "node_b418dfe6761e4b58a21a1347ba3539e7",
+      "label": "hotpot.search_context_1",
+      "kind": "tool",
+      "status": "succeeded",
+      "subtitle": "hotpot.search_context",
+      "schema": {
+        "input": "RawText",
+        "output": "RawText"
+      },
+      "metrics": {
+        "attempts": 1,
+        "artifacts": 1,
+        "latency_ms": 1
+      },
+      "metadata": {
+        "proposal_name": "hotpot.search_context_1",
+        "conversation_turn": 1
+      }
+    },
+    {
+      "id": "node_a73e865d57154482af2bf91d1fe8ed7e",
+      "label": "model_1",
+      "kind": "model",
+      "status": "succeeded",
+      "subtitle": "",
+      "schema": {
+        "input": "RawText",
+        "output": "Summary"
+      },
+      "metrics": {
+        "attempts": 1,
+        "artifacts": 1,
+        "input_tokens": 1061,
+        "output_tokens": 883
+      },
+      "metadata": {
+        "instruction": "Using the provided context, answer the following question concisely. The question is: What science fantasy young adult series, told in first person, has a set of companion books narrating the stories of enslaved worlds and alien species? Do not use outside knowledge.",
+        "proposal_name": "model_1",
+        "conversation_turn": 1
+      }
+    },
+    {
+      "id": "node_0641d1aa57cb4f6a840bf4546ae3cdc1",
+      "label": "final_1",
+      "kind": "final",
+      "status": "succeeded",
+      "subtitle": "",
+      "schema": {
+        "input": "Summary",
+        "output": "FinalAnswer"
+      },
+      "metrics": {
+        "attempts": 1,
+        "artifacts": 1
+      },
+      "metadata": {
+        "proposal_name": "final_1",
+        "conversation_turn": 1
+      }
+    },
+    {
+      "id": "node_84ebdb3dfd8c472c961f78728dd0de25",
+      "label": "intent_2",
+      "kind": "intent",
+      "status": "succeeded",
+      "subtitle": "",
+      "schema": {
+        "input": null,
+        "output": "RawText"
+      },
+      "metrics": {
+        "attempts": 1,
+        "artifacts": 1
+      },
+      "metadata": {
+        "output": {
+          "text": "Which previous evidence titles support the answer to 'What science fantasy young adult series, told in first person, has a set of companion books narrating the stories of enslaved worlds and alien species?'?"
+        },
+        "proposal_name": "intent_2",
+        "conversation_turn": 2
+      }
+    },
+    {
+      "id": "node_6bdc08931a9f437ba5f7cd8d904574ee",
+      "label": "workspace_search_notes_2",
+      "kind": "tool",
+      "status": "succeeded",
+      "subtitle": "workspace.search_notes",
+      "schema": {
+        "input": "RawText",
+        "output": "RawText"
+      },
+      "metrics": {
+        "attempts": 1,
+        "artifacts": 1,
+        "latency_ms": 0
+      },
+      "metadata": {
+        "description": "Retrieves previous conversation notes and evidence based on the follow-up request.",
+        "proposal_name": "workspace_search_notes_2",
+        "conversation_turn": 2
+      }
+    },
+    {
+      "id": "node_9ee369e800e24ec9b16fca5fe738853b",
+      "label": "model_2",
+      "kind": "model",
+      "status": "succeeded",
+      "subtitle": "",
+      "schema": {
+        "input": "RawText",
+        "output": "Summary"
+      },
+      "metrics": {
+        "attempts": 1,
+        "artifacts": 1,
+        "input_tokens": 1289,
+        "output_tokens": 682
+      },
+      "metadata": {
+        "instruction": "Based on the provided conversation context and evidence, identify and list all relevant supporting article titles that support the answer to the question: 'What science fantasy young adult series, told in first person, has a set of companion books narrating the stories of enslaved worlds and alien species?' Focus only on the titles mentioned in the context.",
+        "proposal_name": "model_2",
+        "conversation_turn": 2
+      }
+    },
+    {
+      "id": "node_4cea905be9b34bc1a4fa48413148529c",
+      "label": "final_2",
+      "kind": "final",
+      "status": "succeeded",
+      "subtitle": "",
+      "schema": {
+        "input": "Summary",
+        "output": "FinalAnswer"
+      },
+      "metrics": {
+        "attempts": 1,
+        "artifacts": 1
+      },
+      "metadata": {
+        "proposal_name": "final_2",
+        "conversation_turn": 2
+      }
+    },
+    {
+      "id": "memory_0104b5d2339e4db78c7c62da866e28a0",
+      "label": "workspace memory",
+      "kind": "memory",
+      "status": "persisted",
+      "subtitle": "qa_turn_summary",
+      "schema": {
+        "input": null,
+        "output": "RawText"
+      },
+      "metrics": {
+        "artifacts": 1
+      },
+      "metadata": {
+        "id": "memory_0104b5d2339e4db78c7c62da866e28a0",
+        "workspace_graph_id": "workspace_1f57cf6a4cdb4735ab02f5360cc340ab",
+        "kind": "qa_turn_summary",
+        "text": "Question: What science fantasy young adult series, told in first person, has a set of companion books narrating the stories of enslaved worlds and alien species?\nAnswer: The science fantasy young adult series is **Animorphs**.\n\nThe context notes that the companion book, *The Hork-Bajir Chronicles*, is part of the *Animorphs* series and tells the story of how the Yeerks enslaved the Hork-Bajir and how characters tried to save their world from the invasion. Furthermore, the narration style used in companion material for the series is described as being narrated from the points of view of different characters, alternating in a fashion similar to the main books.\nSupporting titles: Animorphs, The Hork-Bajir Chronicles\nRetrieved evidence:\nquestion: What science fantasy young adult series, told in first person, has a set of companion books narrating the stories of enslaved worlds and alien species?\n\n---\n\nUse at least two evidence paragraphs when the question requires a bridge or comparison.\n\n---\n\ntitle: Animorphs\nscore: 0.588\nparagraph:\nAnimorphs is a science fantasy series of young adult books written by Katherine Applegate and her husband Michael Grant, writing together under the name K. A. Applegate, and published by Scholastic. It is told in first person, with all six main characters taking turns narrating the books through their own perspectives. Horror, war, dehumanization, sanity, morality, innocence, leadership, freedom and growing up are the core themes of the series.\n\n---\n\ntitle: Victoria Hanley\nscore: 0.412\nparagraph:\nVictoria Hanley is an American young adult fantasy novelist. Her first three books, \"The Seer And The Sword\", \"The Healer's Keep\" and \"The Light Of The Oracle\" are companion books to one another. Her newest book (released March 2012) is the sequel of a series, called \"Indigo Magic\", published by Egmont USA. She's also published two non-fiction books through Cotton Wood Press; called \"Seize the Story: A Handbook For Teens Who Like To Write\", and \"Wild Ink: A Grownups Guide To Writing Fiction For Teens\".\n\n---\n\ntitle: List of Square Enix companion books\nscore: 0.353\nparagraph:\nDozens of Square Enix companion books have been produced since 1998, when video game developer Square began to produce books that focused on artwork, developer interviews, and background information on the fictional worlds and characters in its games rather than on gameplay details. The first series of these books was the \"Perfect Works\" series, written and published by Square subsidiary DigiCube. They produced three books between 1998 and 1999 before the line was stopped in favor of the \"Ultimania\" (\u30a2\u30eb\u30c6\u30a3\u30de\u30cb\u30a2 , Arutimania ) series, a portmanteau of ultimate and mania. This series of books is written by Studio BentStuff, which had previously written game guides for Square for \"Final Fantasy VII\". They were published by DigiCube until the company was dissolved in 2003. Square merged with video game publisher Enix on April 1, 2003 to form Square Enix, which resumed publication of the companion books.\n\n---\n\ntitle: The Hork-Bajir Chronicles\nscore: 0.294\nparagraph:\nThe Hork-Bajir Chronicles is the second companion book to the \"Animorphs\" series, written by K. A. Applegate. With respect to continuity within the series, it takes place before book #23, \"The Pretender\", although the events told in the story occur between the time of \"The Ellimist Chronicles\" and \"The Andalite Chronicles\". The book is introduced by Tobias, who flies to the valley of the free Hork-Bajir, where Jara Hamee tells him the story of how the Yeerks enslaved the Hork-Bajir, and how Aldrea, an Andalite, and her companion, Dak Hamee, a Hork-Bajir, tried to save their world from the invasion. Jara Hamee's story is narrated from the points of view of Aldrea, Dak Hamee, and Esplin 9466, alternating in similar fashion to the \"Megamorphs\" books.\n\n---\n\ntitle: The Divide trilogy\nscore: 0.294\nparagraph:\nThe Divide trilogy is a fantasy young adult novel trilogy by Elizabeth Kay, which takes place in an alternate universe. The three books are \"The Divide\" (2002), \"Back to The Divide\" (2005), and \"Jinx on The Divide\" (2006). The first novel was originally published by the small press publisher Chicken House (now a division of Scholastic), with subsequent volumes published by Scholastic, which also reprinted the first novel. The books have been translated into French, German, Spanish, Finnish, Chinese, Japanese, Portuguese, Italian, Romanian and Dutch. Interior illustrations are by Ted Dewan.",
+        "source_artifact_id": null,
+        "source_run_id": "run_340bd33744e94fd396d7299e7f1e7c34",
+        "confidence": 1.0,
+        "metadata": {
+          "case_id": "5a85ea095542994775f606a8",
+          "gold_answer": "Animorphs",
+          "supporting_titles": [
+            "Animorphs",
+            "The Hork-Bajir Chronicles"
+          ]
+        },
+        "created_at": "2026-05-25T21:35:45.193335Z"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge_329473a3173e43619ff432e48d4ab5bf",
+      "source": "node_17e86497f14d41e2a24dacf7ad4f905d",
+      "target": "node_b418dfe6761e4b58a21a1347ba3539e7",
+      "label": "output -> input",
+      "type": "dataflow",
+      "required": true,
+      "transform": null,
+      "metadata": {
+        "conversation_turn": 1
+      }
+    },
+    {
+      "id": "edge_88d40f13b4d346e69f7d8dd196b20e60",
+      "source": "node_b418dfe6761e4b58a21a1347ba3539e7",
+      "target": "node_a73e865d57154482af2bf91d1fe8ed7e",
+      "label": "output -> input",
+      "type": "dataflow",
+      "required": true,
+      "transform": null,
+      "metadata": {
+        "conversation_turn": 1
+      }
+    },
+    {
+      "id": "edge_f5caf782fc0d41939ea4b0c6551ba07f",
+      "source": "node_a73e865d57154482af2bf91d1fe8ed7e",
+      "target": "node_0641d1aa57cb4f6a840bf4546ae3cdc1",
+      "label": "output -> input",
+      "type": "dataflow",
+      "required": true,
+      "transform": null,
+      "metadata": {
+        "conversation_turn": 1
+      }
+    },
+    {
+      "id": "edge_45ef614c4b5b4a0db1ded45e4a92e16f",
+      "source": "node_84ebdb3dfd8c472c961f78728dd0de25",
+      "target": "node_6bdc08931a9f437ba5f7cd8d904574ee",
+      "label": "output -> input",
+      "type": "dataflow",
+      "required": true,
+      "transform": null,
+      "metadata": {
+        "conversation_turn": 2
+      }
+    },
+    {
+      "id": "edge_4d382318a6404d45bcc7b79d92b3b19e",
+      "source": "node_9ee369e800e24ec9b16fca5fe738853b",
+      "target": "node_4cea905be9b34bc1a4fa48413148529c",
+      "label": "output -> input",
+      "type": "dataflow",
+      "required": true,
+      "transform": null,
+      "metadata": {
+        "conversation_turn": 2
+      }
+    },
+    {
+      "id": "edge_9a5153599d3447cd8c7eedcf5207c7de",
+      "source": "node_6bdc08931a9f437ba5f7cd8d904574ee",
+      "target": "node_9ee369e800e24ec9b16fca5fe738853b",
+      "label": "output -> input",
+      "type": "dataflow",
+      "required": true,
+      "transform": null,
+      "metadata": {
+        "conversation_turn": 2
+      }
+    },
+    {
+      "id": "edge_node_0641d1aa57cb4f6a840bf4546ae3cdc1_memory_0104b5d2339e4db78c7c62da866e28a0",
+      "source": "node_0641d1aa57cb4f6a840bf4546ae3cdc1",
+      "target": "memory_0104b5d2339e4db78c7c62da866e28a0",
+      "label": "produced memory",
+      "type": "workspace",
+      "required": true,
+      "transform": null,
+      "metadata": {
+        "edge_type": "produced"
+      }
+    },
+    {
+      "id": "edge_memory_0104b5d2339e4db78c7c62da866e28a0_node_84ebdb3dfd8c472c961f78728dd0de25",
+      "source": "memory_0104b5d2339e4db78c7c62da866e28a0",
+      "target": "node_84ebdb3dfd8c472c961f78728dd0de25",
+      "label": "used context",
+      "type": "workspace",
+      "required": true,
+      "transform": null,
+      "metadata": {
+        "edge_type": "used_context"
+      }
+    }
+  ],
+  "workspace_edges": [
+    {
+      "id": "edge_a976d26cea0346ed8e4a68f9cf9ce40e",
+      "source": "taskgraph_ddb3270c1c4147fe8f71f85a6837c927",
+      "target": "goal_5120c627c079424585d886037d329985",
+      "label": "supports_goal",
+      "type": "workspace",
+      "reason": "Compiled task graph supports active goal",
+      "metadata": {}
+    },
+    {
+      "id": "edge_732a1237d0f3450b806ce5bcc08232c7",
+      "source": "taskgraph_d527c85394f343d3b4e30feaab0321ea",
+      "target": "goal_5120c627c079424585d886037d329985",
+      "label": "supports_goal",
+      "type": "workspace",
+      "reason": "Compiled task graph supports active goal",
+      "metadata": {}
+    },
+    {
+      "id": "edge_a976d26cea0346ed8e4a68f9cf9ce40e",
+      "source": "taskgraph_ddb3270c1c4147fe8f71f85a6837c927",
+      "target": "goal_5120c627c079424585d886037d329985",
+      "label": "supports_goal",
+      "type": "workspace",
+      "reason": "Compiled task graph supports active goal",
+      "metadata": {}
+    }
+  ]
+}
