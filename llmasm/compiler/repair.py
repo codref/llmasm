@@ -50,7 +50,15 @@ def compile_with_repair(
             last_errors = validator(parsed.proposal, expected_goal_action)
             if not last_errors:
                 return parsed.proposal
-        prompt = planner_prompt + "\n\nPrevious errors to fix:\n" + _format_issues(last_errors)
+        prompt = (
+            planner_prompt
+            + "\n\nYour previous attempt had errors. Fix ONLY the issues listed below; "
+            "keep all other nodes and edges unchanged.\n"
+            "Previous proposal:\n"
+            + last_raw
+            + "\n\nErrors to fix:\n"
+            + _format_issues(last_errors)
+        )
     raise CompilationError(
         "Planner failed to produce a valid task graph",
         attempts=max_attempts,

@@ -173,6 +173,16 @@ create table if not exists compilation_failures (
   created_at timestamptz not null default now()
 );
 
+create table if not exists expansion_requests (
+  id text primary key,
+  run_id text not null references runs(id),
+  source_node_id text not null,
+  reason text not null,
+  created_node_ids jsonb not null default '[]'::jsonb,
+  created_edge_ids jsonb not null default '[]'::jsonb,
+  created_at timestamptz not null default now()
+);
+
 create index if not exists idx_task_graphs_workspace on task_graphs(workspace_graph_id);
 create index if not exists idx_runs_task_graph on runs(task_graph_id);
 create index if not exists idx_nodes_task_graph on nodes(task_graph_id);
@@ -182,3 +192,4 @@ create index if not exists idx_workspace_edges_to on workspace_edges(to_type, to
 create index if not exists idx_run_node_states_status on run_node_states(run_id, status);
 create index if not exists idx_artifacts_run on artifacts(run_id);
 create index if not exists idx_embeddings_owner on embeddings(owner_type, owner_id);
+create index if not exists idx_expansion_requests_run on expansion_requests(run_id);

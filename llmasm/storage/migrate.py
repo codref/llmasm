@@ -22,6 +22,13 @@ def run_migrations(conn: Any) -> int:
         version = int(migration.name.split("_", 1)[0])
         if version in applied:
             continue
+        if "pgvector" in migration.name:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM pg_available_extensions WHERE name = 'vector'"
+                )
+                if cur.fetchone() is None:
+                    continue
         with conn.transaction():
             with conn.cursor() as cur:
                 cur.execute(migration.read_text())

@@ -138,6 +138,14 @@ class InMemoryStorage:
         if key and isinstance(inputs, list) and artifact.superseded_by is None:
             self._artifact_cache[(str(key), tuple(sorted(map(str, inputs))))] = artifact.id
 
+    def update_artifact(self, artifact_id: str, superseded_by: str) -> None:
+        artifact = self._get(self.artifacts, artifact_id, "artifact")
+        artifact.superseded_by = superseded_by
+        cache_key = artifact.metadata.get("cache_key")
+        inputs = artifact.metadata.get("input_artifact_ids")
+        if cache_key and isinstance(inputs, list):
+            self._artifact_cache.pop((str(cache_key), tuple(sorted(map(str, inputs)))), None)
+
     def load_artifact(self, artifact_id: str) -> Artifact:
         return deepcopy(self._get(self.artifacts, artifact_id, "artifact"))
 

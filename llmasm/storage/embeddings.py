@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 from math import sqrt
-from typing import Protocol
+from typing import Any, Protocol
 
 from llmasm.config import RuntimeConfig
 from llmasm.graph.models import Artifact, EmbeddingRef, MemoryItem
@@ -121,6 +121,39 @@ def embed_and_persist(
     )
     embedding_store.persist(ref, output.vector)
     return ref
+
+
+def write_memory_item(
+    workspace_graph_id: str,
+    kind: str,
+    text: str,
+    runtime_config: RuntimeConfig,
+    provider: LLMProvider,
+    embedding_store: EmbeddingStore,
+    storage: Any,
+    *,
+    source_artifact_id: str | None = None,
+    source_run_id: str | None = None,
+    confidence: float = 1.0,
+) -> MemoryItem:
+    """Persist a MemoryItem and optionally embed its text.
+
+    Args:
+        storage: Any object implementing the Storage protocol
+            (typed as Any to avoid circular imports).
+    """
+    item = MemoryItem(
+        id=new_id("memory"),
+        workspace_graph_id=workspace_graph_id,
+        kind=kind,
+        text=text,
+        source_artifact_id=source_artifact_id,
+        source_run_id=source_run_id,
+        confidence=confidence,
+    )
+    storage.persist_memory_item(item)
+    embed_and_persist(text, "memory_item", item.id, runtime_config, provider, embedding_store)
+    return item
 
 
 def _cosine(left: list[float], right: list[float]) -> float:

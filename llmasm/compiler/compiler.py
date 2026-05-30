@@ -29,7 +29,6 @@ from llmasm.graph.validation import (
     validate_context_budgets,
     validate_edge_compatibility,
     validate_models,
-    validate_proposal_goal_action,
     validate_required_ports,
     validate_schema_refs,
     validate_terminal_node,
@@ -106,6 +105,8 @@ class Compiler:
             )
             raise
 
+        # Classifier is authoritative; override whatever the planner emitted.
+        proposal.goal_action = goal_action
         task_graph = self._normalize(workspace_graph_id, proposal, prompt, goal.id if goal else None)
         self.storage.persist_task_graph(task_graph)
         for edge in self._workspace_edges(task_graph, proposal):
@@ -131,7 +132,8 @@ class Compiler:
     def _validate_proposal(
         self, proposal: TaskGraphProposal, expected_goal_action: str
     ) -> list[ValidationIssue]:
-        issues = validate_proposal_goal_action(proposal, expected_goal_action)
+        issues: list[ValidationIssue] = []
+        # goal_action is overridden by the classifier after this returns; skip echo check.
         graph = self._normalize("workspace_validation", proposal, "", None, dry_run=True)
         issues.extend(validate_schema_refs(graph, self.schema_registry))
         issues.extend(validate_edge_compatibility(graph, self.transform_registry))

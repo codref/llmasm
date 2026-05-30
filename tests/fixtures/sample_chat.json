@@ -1,0 +1,23 @@
+{
+  "name": "context_aware_qa",
+  "description": "Three-turn fixture: baseline → follow-up → human-injected context. Verifies that injected MemoryItems influence later answers and that workspace edges accumulate correctly.",
+  "turns": [
+    {
+      "prompt": "summarize the project scope",
+      "inject_memory": [],
+      "expected_keywords": ["summary", "scope"]
+    },
+    {
+      "prompt": "now list the main components",
+      "inject_memory": [],
+      "expected_keywords": ["summary"]
+    },
+    {
+      "prompt": "what should I focus on first",
+      "inject_memory": [
+        "the user is a new contributor with no prior Postgres experience"
+      ],
+      "expected_keywords": ["summary"]
+    }
+  ]
+}

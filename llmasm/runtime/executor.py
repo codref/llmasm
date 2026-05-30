@@ -33,7 +33,7 @@ from llmasm.runtime.context import select_context
 from llmasm.runtime.expansion import ExpansionRequest, apply_expansion
 from llmasm.runtime.scheduler import Scheduler
 from llmasm.schemas import FinalAnswer, NotFound, RawText, Summary
-from llmasm.storage.base import Storage
+from llmasm.storage.base import ContextItem, Storage
 from llmasm.storage.embeddings import EmbeddingStore, NullEmbeddingStore, embed_and_persist
 from llmasm.tools.registry import ToolRegistry
 
@@ -191,7 +191,7 @@ class Executor:
                 direct_inputs=direct_inputs,
                 embedding_store=self.embedding_store,
             )
-            prompt = self._render_node_prompt(node, selected.direct_inputs)
+            prompt = self._render_node_prompt(node, selected.direct_inputs, selected.items)
             prompt_artifact = Artifact(
                 id=new_id("artifact"),
                 run_id=run.id,
@@ -321,15 +321,31 @@ class Executor:
             return str(value if value is not None else payload)
         return str(payload)
 
-    def _render_node_prompt(self, node: Node, direct_inputs: dict[str, BaseModel]) -> str:
+    def _render_node_prompt(
+        self,
+        node: Node,
+        direct_inputs: dict[str, BaseModel],
+        context_items: list[ContextItem] | None = None,
+    ) -> str:
         instruction = (
             node.metadata.get("instruction")
             or node.execution.get("prompt_template")
             or node.metadata.get("description")
             or node.name
         )
-        payload = {name: value.model_dump(mode="json") for name, value in sorted(direct_inputs.items())}
-        return json.dumps({"instruction": instruction, "inputs": payload}, sort_keys=True)
+        if context_items:
+            prior = "\n".join(item.text for item in context_items)
+            instruction = (
+                f"{instruction}\n\n"
+                f"--- Prior conversation ---\n{prior}\n---\n\n"
+                f"Use the prior conversation above to resolve references and understand "
+                f"what the question is about. Answer from your own knowledge."
+            )
+        payload: dict[str, Any] = {
+            "instruction": instruction,
+            "inputs": {name: value.model_dump(mode="json") for name, value in sorted(direct_inputs.items())},
+        }
+        return json.dumps(payload, sort_keys=True)
 
     def _ensure_node_states(self, run: Run, nodes: list[Node]) -> None:
         existing = {state.node_id for state in self.storage.list_run_node_states(run.id)}
