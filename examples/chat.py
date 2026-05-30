@@ -34,8 +34,9 @@ from llmasm.graph.registry import default_schema_registry
 from llmasm.ids import new_id
 from llmasm.providers.ollama import OllamaProvider
 from llmasm.schemas import FinalAnswer
+from llmasm.storage.embeddings import InMemoryEmbeddingStore, NullEmbeddingStore, write_memory_item
 from llmasm.storage.memory import InMemoryStorage
-from llmasm.storage.postgres import PostgresStorage
+from llmasm.storage.postgres import PostgresEmbeddingStore, PostgresStorage
 
 
 STYLE = Style.from_dict(
@@ -70,9 +71,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--planner-model", default="llama3.1:8b")
     parser.add_argument("--runtime-model", default="llama3.1:8b")
     parser.add_argument("--embedding-model", default="nomic-embed-text")
+    parser.add_argument("--embedding-dimensions", type=int, default=768)
+    parser.add_argument(
+        "--embeddings",
+        action="store_true",
+        default=False,
+        help="Enable vector embeddings for context retrieval",
+    )
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--compiler-attempts", type=int, default=3)
     parser.add_argument("--workspace-name", default="chat", help="Persistent workspace name")
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        default=False,
+        help="Start a new isolated session (appends a timestamp to the workspace name)",
+    )
     parser.add_argument(
         "--context-turns",
         type=int,
@@ -94,6 +108,17 @@ def _build_storage(args: argparse.Namespace) -> InMemoryStorage | PostgresStorag
     return InMemoryStorage()
 
 
+def _build_embedding_store(
+    args: argparse.Namespace,
+    storage: InMemoryStorage | PostgresStorage,
+) -> InMemoryEmbeddingStore | PostgresEmbeddingStore | NullEmbeddingStore:
+    if not args.embeddings:
+        return NullEmbeddingStore()
+    if args.db_url and isinstance(storage, PostgresStorage):
+        return PostgresEmbeddingStore.create(storage.conn, dimensions=args.embedding_dimensions)
+    return InMemoryEmbeddingStore()
+
+
 def _stable_workspace_id(name: str) -> str:
     """Deterministic workspace ID derived from the workspace name for persistent backends."""
     import re
@@ -108,22 +133,32 @@ def build_app(args: argparse.Namespace) -> LLMASM:
         default_model=args.runtime_model,
         embedding_model=args.embedding_model,
     )
+    storage = _build_storage(args)
+    embedding_store = _build_embedding_store(args, storage)
     return LLMASM(
-        storage=_build_storage(args),
+        storage=storage,
         provider=provider,
         runtime_config=RuntimeConfig(
             planner_model=args.planner_model,
             default_model=args.runtime_model,
             compiler_max_attempts=args.compiler_attempts,
-            embeddings_enabled=False,
+            embedding_model=args.embedding_model,
+            embedding_dimensions=args.embedding_dimensions,
+            embeddings_enabled=args.embeddings,
         ),
         schema_registry=default_schema_registry(),
+        embedding_store=embedding_store,
     )
 
 
 def main() -> None:
     args = parse_args()
     console = Console()
+
+    if args.fresh and args.db_url:
+        import time
+        args.workspace_name = f"{args.workspace_name}_{int(time.time())}"
+
     app = build_app(args)
     storage = app.storage
     goal_tracker = GoalTracker(storage)
@@ -138,11 +173,16 @@ def main() -> None:
         workspace_id = app.create_workspace(args.workspace_name)
         storage_label = "[in-memory]"
 
+    if args.embeddings:
+        embedding_label = f"[embeddings: on ({args.embedding_model}, {args.embedding_dimensions}d)]"
+    else:
+        embedding_label = "[embeddings: off]"
+
     console.print(
         Markdown(
             f"**llmasm chat**  |  workspace: `{args.workspace_name}`  "
             f"|  model: `{args.runtime_model}`  |  planner: `{args.planner_model}`  "
-            f"|  storage: `{storage_label}`\n"
+            f"|  storage: `{storage_label}`  |  {embedding_label}\n"
             f"Type /help for commands, /quit or Ctrl-D to exit."
         )
     )
@@ -258,16 +298,18 @@ def main() -> None:
         tg_short = task_graph_id.split("_")[-1][:12]
         console.print(f"[dim]── turn {turn}  |  goal: {goal_action}  |  tg: {tg_short}[/dim]")
 
-        # Persist turn as a MemoryItem so future turns can retrieve it as context
-        memory = MemoryItem(
-            id=new_id("memory"),
+        # Persist turn as a MemoryItem so future turns can retrieve it as context.
+        # write_memory_item also embeds the text when embeddings_enabled=True.
+        memory = write_memory_item(
             workspace_graph_id=workspace_id,
             kind="turn",
             text=f"Q: {text}\nA: {answer.text}",
+            runtime_config=app.runtime_config,
+            provider=app.provider,
+            embedding_store=app.embedding_store,
+            storage=storage,
             source_run_id=run_id,
-            metadata={"turn": turn, "goal_action": goal_action},
         )
-        storage.persist_memory_item(memory)
 
         # FOLLOWS_UP: new task graph → previous task graph
         if previous_task_graph_id is not None:

@@ -1,6 +1,28 @@
 # LLMASM Implementation Plan
 
-Status: Draft
+Status: **In Progress — V0 near-complete**
+
+| Legend | Meaning |
+|--------|---------|
+| ✅ | Implemented and tests passing |
+| ⚠️ | Implemented with known gap — see note |
+| ⏸ | Deferred |
+| 🔲 | Not started |
+
+### Current status (updated 2026-05-30)
+
+All phases through 14 are complete. Phase 12 gaps closed this session:
+- `RuntimeConfig.embedding_dimensions: int = 768` added
+- `002_pgvector.sql` refactored — column DDL moved to `PostgresEmbeddingStore.__init__`
+- `PostgresEmbeddingStore` is now dimension-aware with a startup guard against mismatches
+- `select_context` vector path implemented (was a stub); merged with word-overlap, deduped by item id
+- `executor.py` passes `provider` to `select_context`
+- `examples/chat.py` wires `--embeddings` / `--embedding-dimensions` flags
+- Test fixtures for embedding DDL teardown fixed to prevent column-leak between sessions
+
+Only Phase 15 (Apache AGE) remains deferred.
+
+---
 
 Purpose: phased build plan for implementing LLMASM from the RFC in `docs/llmgraph-rfc.md`. This document is written for code-generation agents and contributors, so each phase has concrete deliverables, module boundaries, and acceptance checks.
 
@@ -67,7 +89,7 @@ docs/
   llmasm-implementation-plan.md
 ```
 
-## Phase 0: Project Skeleton And Tooling
+## ✅ Phase 0: Project Skeleton And Tooling
 
 Goal: create a runnable Python package with test, lint, and packaging basics.
 
@@ -101,7 +123,7 @@ Acceptance criteria:
 - `pytest` runs with at least one smoke test.
 - No production code talks to Ollama or Postgres yet.
 
-## Phase 1: Core Domain Models
+## ✅ Phase 1: Core Domain Models
 
 Goal: define the in-memory data structures used by every later phase.
 
@@ -140,7 +162,7 @@ Acceptance criteria:
 - A `TaskGraph` can be represented without execution state.
 - A `Run` can reference a `TaskGraph` and maintain independent `RunNodeState` records.
 
-## Phase 2: Schema Registry And Transforms
+## ✅ Phase 2: Schema Registry And Transforms
 
 Goal: support typed ports and deterministic edge compatibility.
 
@@ -176,7 +198,7 @@ Acceptance criteria:
 - Unknown schema tags and transforms produce deterministic validation errors.
 - `extract_text` converts `ConversationRecord` to `ConversationText`.
 
-## Phase 3: Tool Registry And Provider Interfaces
+## ✅ Phase 3: Tool Registry And Provider Interfaces
 
 Goal: define invocation boundaries without building the compiler or executor yet.
 
@@ -209,7 +231,7 @@ Acceptance criteria:
 - Fake tool invocation validates input and output types.
 - Ollama provider is importable but integration tests are skipped unless `OLLAMA_BASE_URL` is set.
 
-## Phase 4: Storage Interfaces And In-Memory Store
+## ✅ Phase 4: Storage Interfaces And In-Memory Store
 
 Goal: build against a storage abstraction before introducing Postgres complexity.
 
@@ -243,7 +265,7 @@ Acceptance criteria:
 - A task graph can be executed twice with separate run node states.
 - Workspace edges can link heterogeneous endpoint types.
 
-## Phase 5: Graph Validation
+## ✅ Phase 5: Graph Validation
 
 Goal: validate task graphs deterministically before execution.
 
@@ -284,7 +306,7 @@ Acceptance criteria:
 - A follow-up task graph with `continue` and no workspace link fails.
 - A planner proposal whose `goal_action` differs from expected fails.
 
-## Phase 6: Goal Tracking
+## ✅ Phase 6: Goal Tracking
 
 Goal: implement deterministic goal classification and lifecycle management.
 
@@ -312,7 +334,7 @@ Acceptance criteria:
 - `"new task..."` classifies as `new`.
 - Provisional goals are finalized only after proposal validation succeeds.
 
-## Phase 7: Compiler Proposal Models And Prompt Renderer
+## ✅ Phase 7: Compiler Proposal Models And Prompt Renderer
 
 Goal: produce and parse structured task graph proposals.
 
@@ -349,7 +371,7 @@ Acceptance criteria:
 - Invalid JSON returns `PARSE_FAILURE`.
 - A valid JSON proposal parses into typed proposal objects.
 
-## Phase 8: Compiler Repair Loop And Normalization
+## ✅ Phase 8: Compiler Repair Loop And Normalization
 
 Goal: compile a user prompt into a persisted task graph.
 
@@ -386,7 +408,7 @@ Acceptance criteria:
 - Compilation failure is persisted.
 - Successful compilation persists task graph, task edges, workspace edges, and goal link.
 
-## Phase 9: Scheduler And Runtime Executor
+## ✅ Phase 9: Scheduler And Runtime Executor
 
 Goal: execute a validated task graph through a VM-style loop.
 
@@ -435,7 +457,7 @@ Acceptance criteria:
 - A tool node with matching inputs and `allow_cache: True` returns a cached artifact without re-invoking the tool.
 - A model node with `allow_cache: False` always re-invokes the provider even when a matching artifact exists.
 
-## Phase 10: Runtime Expansion
+## ✅ Phase 10: Runtime Expansion
 
 Goal: allow ReAct-style reasoning nodes to inject validated work.
 
@@ -468,7 +490,7 @@ Acceptance criteria:
 - Cycle-producing expansion is rejected.
 - Expansion request and created IDs are persisted.
 
-## Phase 11: Postgres Persistence
+## ✅ Phase 11: Postgres Persistence
 
 Goal: replace in-memory storage with a plain Postgres backend matching the RFC fallback schema.
 
@@ -519,13 +541,13 @@ Acceptance criteria:
 - In-memory and Postgres storage pass the same storage contract tests.
 - Artifacts and checkpoints are append-only.
 
-## Phase 12: Memory, Embeddings, And Context Wiring
+## ✅ Phase 12: Memory, Embeddings, And Context Wiring
 
 Goal: replace the text-overlap stub in the context selector with a real retrieval layer; add an embedding store abstraction testable without pgvector.
 
 This phase has four independent sub-goals that can be implemented in order:
 
-### 12a — EmbeddingStore abstraction
+### ✅ 12a — EmbeddingStore abstraction
 
 - Add `llmasm/storage/embeddings.py`:
   - `ScoredMatch(item: MemoryItem | Artifact, score: float, embedding_id: str)`;
@@ -542,7 +564,7 @@ Acceptance criteria for 12a:
 - `NullEmbeddingStore.search_similar` always returns an empty list.
 - Unit tests run without Postgres or Ollama.
 
-### 12b — Embedding lifecycle
+### ✅ 12b — Embedding lifecycle
 
 - Define where and when `provider.embed()` is called:
   - Embeddings are computed **only** when `runtime_config.embeddings_enabled` is `True`.
@@ -556,7 +578,7 @@ Acceptance criteria for 12b:
 - With `embeddings_enabled=True` and a fake provider, `embed_and_persist` persists an `EmbeddingRef` and the vector.
 - A second call with identical text and owner skips `provider.embed()`.
 
-### 12c — Text-based memory retrieval (default path)
+### ✅ 12c — Text-based memory retrieval (default path)
 
 - Add memory retrieval functions in `llmasm/storage/memory.py` (and later mirrored in postgres.py):
   - `retrieve_workspace_context(workspace_graph_id, query, budget_tokens, filters) -> list[ContextItem]`;
@@ -571,7 +593,12 @@ Acceptance criteria for 12c:
 - With `NullEmbeddingStore`, text-overlap ranking is used.
 - With `InMemoryEmbeddingStore` containing embeddings, vector-ranked results appear before lower-scored text matches.
 
-### 12d — Optional pgvector backend
+### ✅ 12d — Optional pgvector backend
+
+> **Gap closed 2026-05-30:** `002_pgvector.sql` now contains only `CREATE EXTENSION`.
+> Column DDL (`vector vector(N)`) is applied at `PostgresEmbeddingStore.__init__` time
+> using `RuntimeConfig.embedding_dimensions` (default 768). A startup guard raises
+> `StorageError` if the existing column has a different dimension count.
 
 - Add `llmasm/storage/migrations/002_pgvector.sql`:
   - check `CREATE EXTENSION IF NOT EXISTS vector` (no-op if already present);
@@ -587,7 +614,7 @@ Acceptance criteria for 12d:
 - With pgvector available, `PostgresEmbeddingStore.search_similar` returns results ordered by vector distance.
 - Without pgvector, the same test passes using the Python cosine fallback.
 
-### 12e — Memory promotion
+### ✅ 12e — Memory promotion
 
 - Add `write_memory_item(workspace_graph_id, kind, text, source_artifact_id, source_run_id, confidence, runtime_config, provider, embedding_store) -> MemoryItem`:
   - persists `MemoryItem` via `Storage`;
@@ -598,7 +625,7 @@ Acceptance criteria for 12e:
 - `write_memory_item` persists both the `MemoryItem` and an `EmbeddingRef` when `embeddings_enabled=True`.
 - `write_memory_item` skips embedding when `embeddings_enabled=False`.
 
-## Phase 13: Run Analysis API
+## ✅ Phase 13: Run Analysis API
 
 Goal: make execution inspection queryable and useful.
 
@@ -620,7 +647,7 @@ Acceptance criteria:
 - Querying a failed run identifies the failed node state and error.
 - Querying an expansion run identifies the source reasoning node and injected nodes.
 
-## Phase 14: Public API And Examples
+## ✅ Phase 14: Public API And Examples
 
 Goal: expose a small ergonomic API without hiding the graph model.
 
@@ -644,7 +671,11 @@ Acceptance criteria:
 - An Ollama example is available but guarded by environment variables.
 - Public API remains thin over compiler, storage, and executor components.
 
-## Phase 15: Optional Apache AGE Backend
+## ⏸ Phase 15: Optional Apache AGE Backend
+
+> **Deferred.** The extension is installed in the Docker image and the `llmasm_graph`
+> AGE graph is created by `initdb/001_extensions.sql`, but there is zero usage in Python
+> code. Implement after V0 is validated end-to-end.
 
 Goal: add graph-query acceleration without changing the core API.
 
@@ -706,6 +737,8 @@ Required integration scenarios:
 7. Prefer small commits by phase or subphase.
 
 ## V0 Completion Definition
+
+**Status: complete** — all checklist items below are satisfied.
 
 V0 is complete when:
 

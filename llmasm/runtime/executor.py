@@ -190,6 +190,7 @@ class Executor:
                 node=node,
                 direct_inputs=direct_inputs,
                 embedding_store=self.embedding_store,
+                provider=self.provider,
             )
             prompt = self._render_node_prompt(node, selected.direct_inputs, selected.items)
             prompt_artifact = Artifact(

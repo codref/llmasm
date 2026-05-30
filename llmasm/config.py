@@ -20,4 +20,5 @@ class RuntimeConfig:
     default_model: str = "llama3.1:8b"
     default_context_tokens: int = 4096
     embedding_model: str = "nomic-embed-text"
+    embedding_dimensions: int = 768
     embeddings_enabled: bool = False

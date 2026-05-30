@@ -818,26 +818,61 @@ def _pg_cosine(left: list[float], right: list[float]) -> float:
 class PostgresEmbeddingStore:
     """Postgres-backed embedding store.
 
-    Uses pgvector ``ORDER BY <=>`` when the vector extension is present and the
-    ``002_pgvector.sql`` migration has been applied.  Falls back to loading all
-    rows and computing cosine similarity in Python otherwise.
+    Uses pgvector ``ORDER BY <=>`` when the vector extension is present.  Falls
+    back to loading all rows and computing cosine similarity in Python otherwise.
 
     Construct via :func:`PostgresEmbeddingStore.create` to auto-detect pgvector.
+    The ``dimensions`` parameter must match the embedding model's output size.
+    Changing dimensions after the column has been created raises :exc:`StorageError`.
     """
 
-    def __init__(self, conn: Any, pgvector: bool = False) -> None:
+    def __init__(self, conn: Any, pgvector: bool = False, dimensions: int = 768) -> None:
         self.conn = conn
         self._pgvector = pgvector
+        self._dimensions = dimensions
+        if pgvector:
+            self._ensure_vector_column()
+
+    def _ensure_vector_column(self) -> None:
+        """Create the vector column + index if absent; guard against dimension mismatches."""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT atttypmod FROM pg_attribute "
+                "WHERE attrelid = 'embeddings'::regclass "
+                "  AND attname = 'vector' "
+                "  AND NOT attisdropped"
+            )
+            row = cur.fetchone()
+        if row is None:
+            # Column does not yet exist — create it with the requested dimensions.
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    f"ALTER TABLE embeddings "
+                    f"ADD COLUMN IF NOT EXISTS vector vector({self._dimensions})"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_embeddings_vector "
+                    "ON embeddings USING ivfflat (vector vector_cosine_ops) "
+                    "WHERE vector IS NOT NULL"
+                )
+        else:
+            existing = row[0]
+            if existing != self._dimensions:
+                raise StorageError(
+                    f"embeddings.vector column has {existing} dimensions but "
+                    f"RuntimeConfig.embedding_dimensions={self._dimensions}. "
+                    "Drop the column and re-initialise to use a different model."
+                )
 
     @classmethod
-    def create(cls, conn: Any) -> "PostgresEmbeddingStore":
+    def create(cls, conn: Any, dimensions: int = 768) -> "PostgresEmbeddingStore":
         """Return an instance with pgvector enabled when the extension is present."""
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT 1 FROM pg_available_extensions WHERE name = 'vector'"
             )
             has_ext = cur.fetchone() is not None
-        return cls(conn, pgvector=has_ext)
+        return cls(conn, pgvector=has_ext, dimensions=dimensions)
 
     # ── EmbeddingStore protocol ───────────────────────────────────────────
 
@@ -876,20 +911,32 @@ class PostgresEmbeddingStore:
         limit: int,
     ) -> list[ScoredMatch]:
         filters = filters or {}
+        owner_type = str(filters["owner_type"]) if filters.get("owner_type") else None
+        workspace_id = str(filters["workspace_graph_id"]) if filters.get("workspace_graph_id") else None
+
+        # When filtering by workspace, JOIN against the owning table rather than
+        # post-filtering so the DB does the work and the LIMIT is accurate.
+        join_sql = ""
         where_parts: list[str] = []
         params: list[object] = []
-        if filters.get("owner_type"):
-            where_parts.append("owner_type = %s")
-            params.append(filters["owner_type"])
-        where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+        if owner_type:
+            where_parts.append("e.owner_type = %s")
+            params.append(owner_type)
+        if workspace_id and owner_type == "memory_item":
+            join_sql = "JOIN memory_items mi ON mi.id = e.owner_id"
+            where_parts.append("mi.workspace_graph_id = %s")
+            params.append(workspace_id)
 
         with self.conn.cursor(row_factory=dict_row) as cur:
             if self._pgvector:
                 vec_str = "[" + ",".join(str(v) for v in query_vector) + "]"
+                pg_where = where_parts + ["e.vector IS NOT NULL"]
+                where_sql = "WHERE " + " AND ".join(pg_where)
                 cur.execute(
-                    f"SELECT * FROM embeddings {where_sql} "
-                    f"ORDER BY vector <=> %s::vector LIMIT %s",
-                    (*params, vec_str, limit),
+                    f"SELECT e.*, 1 - (e.vector <=> %s::vector) AS cosine_score "
+                    f"FROM embeddings e {join_sql} {where_sql} "
+                    f"ORDER BY e.vector <=> %s::vector LIMIT %s",
+                    (*params, vec_str, vec_str, limit),
                 )
                 rows = cur.fetchall()
                 matches: list[ScoredMatch] = []
@@ -897,11 +944,13 @@ class PostgresEmbeddingStore:
                     ref = self._row_to_ref(row)
                     item = self._load_item(ref.owner_type, ref.owner_id)
                     if item is not None:
-                        matches.append(ScoredMatch(item=item, score=1.0, embedding_id=ref.id))
+                        score = float(row["cosine_score"]) if row.get("cosine_score") is not None else 0.0
+                        matches.append(ScoredMatch(item=item, score=score, embedding_id=ref.id))
                 return matches
             else:
+                where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
                 cur.execute(
-                    f"SELECT * FROM embeddings {where_sql} ORDER BY created_at",
+                    f"SELECT e.* FROM embeddings e {join_sql} {where_sql} ORDER BY e.created_at",
                     params if params else [],
                 )
                 rows = cur.fetchall()

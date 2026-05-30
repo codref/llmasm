@@ -76,6 +76,29 @@ fake tools — no Postgres or Ollama required.
 | `open_dataset_qa.py` | Autonomous SQuAD 2.0 QA benchmark with local Wikipedia retriever |
 | `hotpot_multihop_qa.py` | Multi-hop HotpotQA benchmark with conversation-demo mode and workspace memory |
 
+### Interactive chat with Postgres and embeddings
+
+Run the chat interface backed by Postgres with vector-embedding context retrieval
+(requires Ollama with the embedding model pulled):
+
+```bash
+# Default: nomic-embed-text, 768 dimensions
+python examples/chat.py \
+  --db-url postgresql://llmasm:llmasm@localhost:15432/llmasm \
+  --embeddings
+
+# Custom model and dimensions
+python examples/chat.py \
+  --db-url postgresql://llmasm:llmasm@localhost:15432/llmasm \
+  --embeddings \
+  --embedding-model mxbai-embed-large \
+  --embedding-dimensions 1024
+```
+
+> **Note:** `--embedding-dimensions` must match the model's actual output size.
+> Changing it after a workspace has been created raises a `StorageError` — drop
+> the `vector` column and re-initialise to switch models.
+
 ## Architecture
 
 ```
@@ -117,9 +140,17 @@ make e2e-stack-up
 make e2e-stack-down
 ```
 
-Testing markers: `pytest -m "not integration"` for unit tests only,
-`pytest -m postgres` for Postgres integration tests,
-`pytest -m pgvector` for pgvector tests (requires pgvector extension).
+### Postgres integration tests
+
+The e2e stack exposes Postgres on port 15432. Once it's up, run the integration
+test suite with:
+
+```bash
+LLMASM_TEST_DB=postgresql://llmasm:llmasm@localhost:15432/llmasm \
+    python -m pytest tests/unit/test_postgres_storage.py -v
+```
+
+Tests are skipped automatically when `LLMASM_TEST_DB` is not set.
 
 ## Documentation
 

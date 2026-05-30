@@ -475,3 +475,75 @@ def test_find_cached_artifact(storage):
 
     not_found2 = storage.find_cached_artifact("key_xyz", ["art_1", "art_2"])
     assert not_found2 is None
+
+
+# ── PostgresEmbeddingStore ────────────────────────────────────────────────────
+
+
+@pytest.fixture()
+def embedding_store(storage):
+    """PostgresEmbeddingStore wired to the test DB connection."""
+    from llmasm.storage.postgres import PostgresEmbeddingStore
+
+    store = PostgresEmbeddingStore.create(storage.conn, dimensions=2)
+    yield store
+    # Drop the vector column so dimension DDL never leaks across test runs.
+    with storage.conn.cursor() as cur:
+        cur.execute("ALTER TABLE embeddings DROP COLUMN IF EXISTS vector")
+        cur.execute("DROP INDEX IF EXISTS idx_embeddings_vector")
+
+
+@needs_db
+def test_embedding_store_round_trip(storage, embedding_store):
+    from llmasm.graph.models import EmbeddingRef, MemoryItem
+    from llmasm.ids import new_id
+
+    ws = _workspace()
+    storage.create_workspace_graph(ws)
+    item = MemoryItem(
+        id=new_id("memory"),
+        workspace_graph_id=ws.id,
+        kind="fact",
+        text="Postgres round-trip test fact.",
+    )
+    storage.persist_memory_item(item)
+
+    ref = EmbeddingRef(
+        id=new_id("memory"),
+        owner_type="memory_item",
+        owner_id=item.id,
+        model="test-model",
+        dimensions=2,
+        text_hash="deadbeef",
+    )
+    embedding_store.persist(ref, [1.0, 0.0])
+
+    assert embedding_store.has_embedding("memory_item", item.id, "deadbeef")
+    assert not embedding_store.has_embedding("memory_item", item.id, "other")
+
+    found = embedding_store.find_by_owner("memory_item", item.id)
+    assert found is not None
+    assert found.id == ref.id
+
+    matches = embedding_store.search_similar([0.9, 0.1], {"owner_type": "memory_item"}, limit=5)
+    assert len(matches) == 1
+    assert matches[0].item.id == item.id
+    assert matches[0].score >= 0.0
+
+
+@needs_db
+def test_embedding_store_dimension_mismatch_raises(storage):
+    from llmasm.errors import StorageError
+    from llmasm.storage.postgres import PostgresEmbeddingStore
+
+    # First store establishes a 2-dim column.
+    PostgresEmbeddingStore.create(storage.conn, dimensions=2)
+
+    # A second store requesting a different dimension must raise StorageError.
+    with pytest.raises(StorageError, match="dimensions"):
+        PostgresEmbeddingStore.create(storage.conn, dimensions=4)
+
+    # Clean up so the column does not leak into other sessions.
+    with storage.conn.cursor() as cur:
+        cur.execute("ALTER TABLE embeddings DROP COLUMN IF EXISTS vector")
+        cur.execute("DROP INDEX IF EXISTS idx_embeddings_vector")

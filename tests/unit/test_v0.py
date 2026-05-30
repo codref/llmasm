@@ -386,3 +386,70 @@ def test_executor_accepts_planner_intent_text_variants() -> None:
 
     assert executor._intent_raw_text("text", {"text": "question text"}) == "question text"
     assert executor._intent_raw_text({"output.text": "question text"}, {}) == "question text"
+
+
+def test_select_context_vector_path_returns_memory_items() -> None:
+    """select_context should embed the query and surface matching MemoryItems."""
+    from llmasm.graph.models import EmbeddingRef, MemoryItem, Run
+    from llmasm.runtime.context import select_context
+    from llmasm.storage.embeddings import InMemoryEmbeddingStore
+
+    storage = InMemoryStorage()
+    workspace_id = new_id("workspace")
+    storage.create_workspace_graph(WorkspaceGraph(id=workspace_id, name="test"))
+
+    item = MemoryItem(
+        id=new_id("memory"),
+        workspace_graph_id=workspace_id,
+        kind="fact",
+        text="The sky is blue.",
+    )
+    storage.persist_memory_item(item)
+
+    emb_store = InMemoryEmbeddingStore()
+    emb_store.attach_item("memory_item", item.id, item)
+    emb_store.persist(
+        EmbeddingRef(
+            id=new_id("memory"),
+            owner_type="memory_item",
+            owner_id=item.id,
+            model="nomic-embed-text",
+            dimensions=2,
+            text_hash="abc",
+        ),
+        [1.0, 0.0],  # fixed vector; FakeProvider will return a compatible direction
+    )
+
+    tg_id = new_id("taskgraph")
+    node = Node(
+        id=new_id("node"),
+        workspace_graph_id=workspace_id,
+        task_graph_id=tg_id,
+        kind=NodeKind.MODEL,
+        name="summarize",
+        metadata={"instruction": "summarize"},
+    )
+    storage.persist_task_graph(
+        TaskGraph(id=tg_id, workspace_graph_id=workspace_id, nodes=[node])
+    )
+    run = Run(id=new_id("run"), workspace_graph_id=workspace_id, task_graph_id=tg_id)
+    storage.create_run(run)
+
+    provider = FakeProvider()
+    config = RuntimeConfig(embeddings_enabled=True, embedding_model="nomic-embed-text")
+
+    result = select_context(
+        storage=storage,
+        runtime_config=config,
+        run=run,
+        node=node,
+        direct_inputs={},
+        embedding_store=emb_store,
+        provider=provider,
+    )
+
+    assert provider.embed_calls == 1
+    assert any(ci.id == item.id for ci in result.items)
+    matched = next(ci for ci in result.items if ci.id == item.id)
+    assert matched.score > 0
+    assert matched.text == item.text
