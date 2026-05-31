@@ -67,3 +67,10 @@ class NotFound(BaseModel):
     resource_type: str
     resource_id: str
     detail: str
+
+
+class RoutingDecision(BaseModel):
+    """Router node output selecting a downstream branch."""
+
+    selected_branch: str
+    reason: str | None = None

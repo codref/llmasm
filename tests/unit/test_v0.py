@@ -355,8 +355,8 @@ def test_unsupported_kind_fails_with_kind_name() -> None:
         id="node_1",
         workspace_graph_id=workspace.id,
         task_graph_id="taskgraph_1",
-        kind=NodeKind.ROUTER,
-        name="route",
+        kind=NodeKind.MEMORY_QUERY,
+        name="mem",
     )
     storage.persist_task_graph(TaskGraph(id="taskgraph_1", workspace_graph_id=workspace.id, nodes=[node]))
     run = Run(id="run_1", workspace_graph_id=workspace.id, task_graph_id="taskgraph_1")
@@ -369,7 +369,7 @@ def test_unsupported_kind_fails_with_kind_name() -> None:
         transform_registry=default_transform_registry(),
         runtime_config=RuntimeConfig(),
     )
-    with pytest.raises(Exception, match="router"):
+    with pytest.raises(Exception, match="memory_query"):
         executor.execute(run.id)
 
 
@@ -453,3 +453,134 @@ def test_select_context_vector_path_returns_memory_items() -> None:
     matched = next(ci for ci in result.items if ci.id == item.id)
     assert matched.score > 0
     assert matched.text == item.text
+
+
+# ---------------------------------------------------------------------------
+# Router tests
+# ---------------------------------------------------------------------------
+
+def _build_router_graph(workspace_id: str, storage: InMemoryStorage, *, not_found_input: bool = False) -> Run:
+    """Build intent → router → {found: model → final_ok} / {missing: final_missing} graph."""
+    from llmasm.graph.models import TaskEdge, TaskGraph
+    from llmasm.schemas import NotFound, RawText
+
+    tg_id = new_id("taskgraph")
+
+    n_intent = Node(id=new_id("node"), workspace_graph_id=workspace_id, task_graph_id=tg_id, kind=NodeKind.INTENT, name="intent", output_schema="RawText", metadata={"output": {"text": "test"}})
+    n_router = Node(id=new_id("node"), workspace_graph_id=workspace_id, task_graph_id=tg_id, kind=NodeKind.ROUTER, name="router", input_schema="RawText", output_schema="RoutingDecision", execution={"mode": "deterministic", "default_branch": "found", "not_found_branch": "missing"})
+    n_model = Node(id=new_id("node"), workspace_graph_id=workspace_id, task_graph_id=tg_id, kind=NodeKind.MODEL, name="summarise", input_schema="RawText", output_schema="Summary", execution={"model": "fake-model"}, metadata={"instruction": "summarise"})
+    n_final_ok = Node(id=new_id("node"), workspace_graph_id=workspace_id, task_graph_id=tg_id, kind=NodeKind.FINAL, name="final_ok", input_schema="Summary", output_schema="FinalAnswer")
+    n_final_missing = Node(id=new_id("node"), workspace_graph_id=workspace_id, task_graph_id=tg_id, kind=NodeKind.FINAL, name="final_missing", input_schema="RawText", output_schema="FinalAnswer")
+
+    if not_found_input:
+        n_intent = n_intent.model_copy(update={"output_schema": "NotFound", "metadata": {"output": {"resource_type": "doc", "resource_id": "x", "detail": "not found"}}})
+        n_router = n_router.model_copy(update={"input_schema": "NotFound"})
+
+    edges = [
+        TaskEdge(id=new_id("edge"), workspace_graph_id=workspace_id, task_graph_id=tg_id, from_node_id=n_intent.id, from_port="output", to_node_id=n_router.id, to_port="input"),
+        TaskEdge(id=new_id("edge"), workspace_graph_id=workspace_id, task_graph_id=tg_id, from_node_id=n_router.id, from_port="output", to_node_id=n_model.id, to_port="input", metadata={"branch": "found"}),
+        TaskEdge(id=new_id("edge"), workspace_graph_id=workspace_id, task_graph_id=tg_id, from_node_id=n_router.id, from_port="output", to_node_id=n_final_missing.id, to_port="input", metadata={"branch": "missing"}),
+        TaskEdge(id=new_id("edge"), workspace_graph_id=workspace_id, task_graph_id=tg_id, from_node_id=n_model.id, from_port="output", to_node_id=n_final_ok.id, to_port="input"),
+    ]
+    graph = TaskGraph(id=tg_id, workspace_graph_id=workspace_id, nodes=[n_intent, n_router, n_model, n_final_ok, n_final_missing], task_edges=edges)
+    storage.persist_task_graph(graph)
+    run = Run(id=new_id("run"), workspace_graph_id=workspace_id, task_graph_id=tg_id)
+    storage.create_run(run)
+    return run, graph
+
+
+def test_router_deterministic_selects_found_branch() -> None:
+    from llmasm.graph.models import NodeStatus
+
+    schemas = default_schema_registry()
+    storage = InMemoryStorage()
+    workspace_id = new_id("workspace")
+    storage.create_workspace_graph(WorkspaceGraph(id=workspace_id, name="test"))
+    run, graph = _build_router_graph(workspace_id, storage, not_found_input=False)
+
+    executor = Executor(
+        storage=storage,
+        tool_registry=ToolRegistry(schemas),
+        provider=FakeProvider(model_text="summary text"),
+        schema_registry=schemas,
+        transform_registry=default_transform_registry(),
+        runtime_config=RuntimeConfig(default_model="fake-model"),
+    )
+    completed_run = executor.execute(run.id)
+
+    assert completed_run.status == RunStatus.SUCCEEDED
+    states = {s.node_id: s for s in storage.list_run_node_states(run.id)}
+    nodes_by_name = {n.name: n for n in graph.nodes}
+
+    assert states[nodes_by_name["summarise"].id].status == NodeStatus.SUCCEEDED
+    assert states[nodes_by_name["final_ok"].id].status == NodeStatus.SUCCEEDED
+    assert states[nodes_by_name["final_missing"].id].status == NodeStatus.SKIPPED
+
+
+def test_router_deterministic_selects_not_found_branch() -> None:
+    from llmasm.graph.models import NodeStatus
+
+    schemas = default_schema_registry()
+    storage = InMemoryStorage()
+    workspace_id = new_id("workspace")
+    storage.create_workspace_graph(WorkspaceGraph(id=workspace_id, name="test"))
+    run, graph = _build_router_graph(workspace_id, storage, not_found_input=True)
+
+    executor = Executor(
+        storage=storage,
+        tool_registry=ToolRegistry(schemas),
+        provider=FakeProvider(model_text="summary text"),
+        schema_registry=schemas,
+        transform_registry=default_transform_registry(),
+        runtime_config=RuntimeConfig(default_model="fake-model"),
+    )
+    completed_run = executor.execute(run.id)
+
+    assert completed_run.status == RunStatus.SUCCEEDED
+    states = {s.node_id: s for s in storage.list_run_node_states(run.id)}
+    nodes_by_name = {n.name: n for n in graph.nodes}
+
+    assert states[nodes_by_name["summarise"].id].status == NodeStatus.SKIPPED
+    assert states[nodes_by_name["final_ok"].id].status == NodeStatus.SKIPPED
+    assert states[nodes_by_name["final_missing"].id].status == NodeStatus.SUCCEEDED
+
+
+def test_router_model_assisted_selects_branch() -> None:
+    from llmasm.graph.models import NodeStatus, TaskEdge, TaskGraph
+
+    schemas = default_schema_registry()
+    storage = InMemoryStorage()
+    workspace_id = new_id("workspace")
+    storage.create_workspace_graph(WorkspaceGraph(id=workspace_id, name="test"))
+
+    tg_id = new_id("taskgraph")
+    n_intent = Node(id=new_id("node"), workspace_graph_id=workspace_id, task_graph_id=tg_id, kind=NodeKind.INTENT, name="intent", output_schema="RawText", metadata={"output": {"text": "test"}})
+    n_router = Node(id=new_id("node"), workspace_graph_id=workspace_id, task_graph_id=tg_id, kind=NodeKind.ROUTER, name="router", input_schema="RawText", output_schema="RoutingDecision", execution={"mode": "model", "model": "fake-model", "branches": ["yes", "no"]}, metadata={"instruction": "pick yes or no"})
+    n_yes = Node(id=new_id("node"), workspace_graph_id=workspace_id, task_graph_id=tg_id, kind=NodeKind.FINAL, name="final_yes", input_schema="RawText", output_schema="FinalAnswer")
+    n_no = Node(id=new_id("node"), workspace_graph_id=workspace_id, task_graph_id=tg_id, kind=NodeKind.FINAL, name="final_no", input_schema="RawText", output_schema="FinalAnswer")
+    edges = [
+        TaskEdge(id=new_id("edge"), workspace_graph_id=workspace_id, task_graph_id=tg_id, from_node_id=n_intent.id, from_port="output", to_node_id=n_router.id, to_port="input"),
+        TaskEdge(id=new_id("edge"), workspace_graph_id=workspace_id, task_graph_id=tg_id, from_node_id=n_router.id, from_port="output", to_node_id=n_yes.id, to_port="input", metadata={"branch": "yes"}),
+        TaskEdge(id=new_id("edge"), workspace_graph_id=workspace_id, task_graph_id=tg_id, from_node_id=n_router.id, from_port="output", to_node_id=n_no.id, to_port="input", metadata={"branch": "no"}),
+    ]
+    graph = TaskGraph(id=tg_id, workspace_graph_id=workspace_id, nodes=[n_intent, n_router, n_yes, n_no], task_edges=edges)
+    storage.persist_task_graph(graph)
+    run = Run(id=new_id("run"), workspace_graph_id=workspace_id, task_graph_id=tg_id)
+    storage.create_run(run)
+
+    # FakeProvider returns this JSON for the model-assisted router call
+    provider = FakeProvider(model_text='{"selected_branch": "yes", "reason": "test"}')
+    executor = Executor(
+        storage=storage,
+        tool_registry=ToolRegistry(schemas),
+        provider=provider,
+        schema_registry=schemas,
+        transform_registry=default_transform_registry(),
+        runtime_config=RuntimeConfig(default_model="fake-model"),
+    )
+    completed_run = executor.execute(run.id)
+
+    assert completed_run.status == RunStatus.SUCCEEDED
+    states = {s.node_id: s for s in storage.list_run_node_states(run.id)}
+    assert states[n_yes.id].status == NodeStatus.SUCCEEDED
+    assert states[n_no.id].status == NodeStatus.SKIPPED

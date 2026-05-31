@@ -27,8 +27,14 @@ services:
       - "${GRAPH_VIEWER_PORT:-3000}:3000"
     environment:
       GRAPH_VIEWER_DATA: /app/data/graph.json
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-llmasm}:${POSTGRES_PASSWORD:-llmasm}@postgres:5432/${POSTGRES_DB:-llmasm}"
     volumes:
       - ./docker/graph-viewer/data:/app/data:ro
+      - ./docker/graph-viewer/server.py:/app/server.py:ro
+      - ./docker/graph-viewer/static:/app/static:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   llmasm-postgres-data:

@@ -22,3 +22,4 @@ class RuntimeConfig:
     embedding_model: str = "nomic-embed-text"
     embedding_dimensions: int = 768
     embeddings_enabled: bool = False
+    reference_workspace_ids: list[str] = field(default_factory=list)

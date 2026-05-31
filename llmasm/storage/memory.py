@@ -246,17 +246,22 @@ class InMemoryStorage:
 
     def retrieve_workspace_context(
         self,
-        workspace_graph_id: str,
+        workspace_graph_id: str | list[str],
         query: str,
         budget_tokens: int,
         filters: dict[str, Any] | None = None,
     ) -> list[ContextItem]:
+        ids = [workspace_graph_id] if isinstance(workspace_graph_id, str) else workspace_graph_id
+        all_items: list[MemoryItem] = []
+        for ws_id in ids:
+            all_items.extend(self.search_memory(ws_id, query, filters, limit=50))
+        ranked = sorted(all_items, key=lambda item: _word_overlap_score(query, item.text), reverse=True)
         total = 0
         context: list[ContextItem] = []
-        for item in self.search_memory(workspace_graph_id, query, filters, limit=50):
+        for item in ranked:
             tokens = max(1, len(item.text.split()))
             if total + tokens > budget_tokens:
-                break
+                continue
             total += tokens
             context.append(
                 ContextItem(

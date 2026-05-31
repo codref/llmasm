@@ -55,7 +55,14 @@ class InMemoryEmbeddingStore:
     ) -> list[ScoredMatch]:
         filters = filters or {}
         owner_type_filter = filters.get("owner_type")
-        workspace_filter = filters.get("workspace_graph_id")
+        # Accept either a single id or a list of ids for workspace filtering.
+        _ws_ids = filters.get("workspace_graph_ids")
+        _ws_id = filters.get("workspace_graph_id")
+        workspace_filter: set[str] | None = None
+        if _ws_ids:
+            workspace_filter = set(_ws_ids)  # type: ignore[arg-type]
+        elif _ws_id:
+            workspace_filter = {str(_ws_id)}
         matches: list[ScoredMatch] = []
         for embedding_id, ref in self.refs.items():
             if owner_type_filter and owner_type_filter != ref.owner_type:
@@ -63,7 +70,7 @@ class InMemoryEmbeddingStore:
             item = self.items.get(f"{ref.owner_type}:{ref.owner_id}")
             if item is None:
                 continue
-            if workspace_filter and isinstance(item, MemoryItem) and item.workspace_graph_id != workspace_filter:
+            if workspace_filter and isinstance(item, MemoryItem) and item.workspace_graph_id not in workspace_filter:
                 continue
             matches.append(
                 ScoredMatch(item=item, score=_cosine(query_vector, self.vectors[embedding_id]), embedding_id=embedding_id)

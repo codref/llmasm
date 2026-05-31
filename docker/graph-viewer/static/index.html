@@ -11,7 +11,12 @@
       <header class="toolbar">
         <div class="title-block">
           <h1>LLMASM Graph Viewer</h1>
-          <p id="run-meta">Loading graph...</p>
+          <p id="run-meta">Loading…</p>
+        </div>
+        <div class="toolbar-controls">
+          <select id="workspace-select" title="Workspace"><option value="">— workspace —</option></select>
+          <select id="task-graph-select" title="Subgraph"><option value="">All subgraphs</option></select>
+          <input id="search-input" type="search" placeholder="Search nodes, memory, goals…" autocomplete="off" />
         </div>
         <div class="toolbar-actions">
           <button id="fit-btn" type="button" title="Fit graph">Fit</button>
@@ -26,12 +31,24 @@
               <option value="all">All</option>
             </select>
           </div>
+          <div class="subgraphs" id="subgraph-list">
+            <div class="section-title">Subgraphs</div>
+          </div>
           <div class="legend" id="legend"></div>
           <div class="stats" id="stats"></div>
         </aside>
+        <div class="resize-handle" id="resize-left" title="Drag to resize"></div>
         <section class="stage" aria-label="Graph canvas">
           <svg id="graph" role="img" aria-label="LLMASM task graph"></svg>
+          <div id="search-overlay" hidden>
+            <div class="search-header">
+              <span id="search-count"></span>
+              <button id="search-close" type="button" title="Close search">✕</button>
+            </div>
+            <div id="search-results"></div>
+          </div>
         </section>
+        <div class="resize-handle" id="resize-right" title="Drag to resize"></div>
         <aside class="inspector">
           <h2>Selection</h2>
           <div id="inspector-body" class="inspector-body">Select a node or edge.</div>

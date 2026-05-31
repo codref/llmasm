@@ -776,17 +776,22 @@ class PostgresStorage:
 
     def retrieve_workspace_context(
         self,
-        workspace_graph_id: str,
+        workspace_graph_id: str | list[str],
         query: str,
         budget_tokens: int,
         filters: dict[str, Any] | None = None,
     ) -> list[ContextItem]:
+        ids = [workspace_graph_id] if isinstance(workspace_graph_id, str) else workspace_graph_id
+        all_items: list[MemoryItem] = []
+        for ws_id in ids:
+            all_items.extend(self.search_memory(ws_id, query, filters, limit=50))
+        ranked = sorted(all_items, key=lambda item: _word_overlap_score(query, item.text), reverse=True)
         total = 0
         context: list[ContextItem] = []
-        for item in self.search_memory(workspace_graph_id, query, filters, limit=50):
+        for item in ranked:
             tokens = max(1, len(item.text.split()))
             if total + tokens > budget_tokens:
-                break
+                continue
             total += tokens
             context.append(
                 ContextItem(
@@ -912,7 +917,14 @@ class PostgresEmbeddingStore:
     ) -> list[ScoredMatch]:
         filters = filters or {}
         owner_type = str(filters["owner_type"]) if filters.get("owner_type") else None
-        workspace_id = str(filters["workspace_graph_id"]) if filters.get("workspace_graph_id") else None
+        # Accept either workspace_graph_ids (list) or workspace_graph_id (single).
+        _ws_ids = filters.get("workspace_graph_ids")
+        _ws_id = filters.get("workspace_graph_id")
+        workspace_ids: list[str] | None = None
+        if _ws_ids:
+            workspace_ids = list(_ws_ids)  # type: ignore[arg-type]
+        elif _ws_id:
+            workspace_ids = [str(_ws_id)]
 
         # When filtering by workspace, JOIN against the owning table rather than
         # post-filtering so the DB does the work and the LIMIT is accurate.
@@ -922,10 +934,10 @@ class PostgresEmbeddingStore:
         if owner_type:
             where_parts.append("e.owner_type = %s")
             params.append(owner_type)
-        if workspace_id and owner_type == "memory_item":
+        if workspace_ids and owner_type == "memory_item":
             join_sql = "JOIN memory_items mi ON mi.id = e.owner_id"
-            where_parts.append("mi.workspace_graph_id = %s")
-            params.append(workspace_id)
+            where_parts.append("mi.workspace_graph_id = ANY(%s)")
+            params.append(workspace_ids)
 
         with self.conn.cursor(row_factory=dict_row) as cur:
             if self._pgvector:
@@ -936,7 +948,7 @@ class PostgresEmbeddingStore:
                     f"SELECT e.*, 1 - (e.vector <=> %s::vector) AS cosine_score "
                     f"FROM embeddings e {join_sql} {where_sql} "
                     f"ORDER BY e.vector <=> %s::vector LIMIT %s",
-                    (*params, vec_str, vec_str, limit),
+                    (vec_str, *params, vec_str, limit),
                 )
                 rows = cur.fetchall()
                 matches: list[ScoredMatch] = []

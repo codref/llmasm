@@ -57,6 +57,7 @@ def default_schema_registry() -> SchemaRegistry:
         schemas.RawText,
         schemas.JsonValue,
         schemas.NotFound,
+        schemas.RoutingDecision,
     ):
         registry.register(model.__name__, model)
     return registry

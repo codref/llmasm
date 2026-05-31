@@ -88,6 +88,14 @@ def parse_args() -> argparse.Namespace:
         help="Start a new isolated session (appends a timestamp to the workspace name)",
     )
     parser.add_argument(
+        "--ref-workspace",
+        action="append",
+        dest="ref_workspaces",
+        default=[],
+        metavar="NAME",
+        help="Read-only workspace to include as extra context source (repeatable)",
+    )
+    parser.add_argument(
         "--context-turns",
         type=int,
         default=10,
@@ -135,6 +143,7 @@ def build_app(args: argparse.Namespace) -> LLMASM:
     )
     storage = _build_storage(args)
     embedding_store = _build_embedding_store(args, storage)
+    ref_ids = [_stable_workspace_id(name) for name in (args.ref_workspaces or [])]
     return LLMASM(
         storage=storage,
         provider=provider,
@@ -145,6 +154,7 @@ def build_app(args: argparse.Namespace) -> LLMASM:
             embedding_model=args.embedding_model,
             embedding_dimensions=args.embedding_dimensions,
             embeddings_enabled=args.embeddings,
+            reference_workspace_ids=ref_ids,
         ),
         schema_registry=default_schema_registry(),
         embedding_store=embedding_store,
@@ -191,6 +201,7 @@ def main() -> None:
     session: PromptSession[str] = PromptSession(history=InMemoryHistory())
     previous_task_graph_id: str | None = None
     previous_final_node_id: str | None = None
+    last_analysis: RunAnalysis | None = None
     turn = 0
 
     while True:
@@ -218,6 +229,8 @@ def main() -> None:
                 "  /quit            — exit\n"
                 "  /clear           — close active goal and reset conversation\n"
                 "  /inspect         — show workspace memory items and edge count\n"
+                "  /graph           — show the task graph from the last turn\n"
+                "  /run             — show node states from the last run\n"
                 "  /inject <text>   — add a context note before the next turn\n"
                 "  anything else is sent to llmasm"
             )
@@ -253,6 +266,76 @@ def main() -> None:
                 )
             continue
 
+        if text == "/graph":
+            if last_analysis is None:
+                console.print("[dim]No task graph yet — run a prompt first.[/dim]")
+            else:
+                tg = last_analysis.task_graph
+                state_by_node = {s.node_id: s for s in last_analysis.node_states}
+                has_router = any(n.kind == "router" for n in tg.nodes)
+                console.print(
+                    f"[bold]Task graph[/bold] {tg.id}  "
+                    f"({len(tg.nodes)} nodes, {len(tg.task_edges)} edges)"
+                    + ("  [bold yellow][router][/bold yellow]" if has_router else "  [dim][no router][/dim]")
+                )
+                node_by_id = {n.id: n for n in tg.nodes}
+                for node in tg.nodes:
+                    state = state_by_node.get(node.id)
+                    status = state.status if state else "?"
+                    status_colour = {"succeeded": "green", "failed": "red", "skipped": "yellow"}.get(status, "dim")
+                    extra = ""
+                    if node.kind == "router" and state and state.status == "succeeded":
+                        branch = state.metadata.get("selected_branch", "")
+                        extra = f"  [bold cyan]→ branch={branch}[/bold cyan]" if branch else ""
+                    elif status == "skipped":
+                        reason = (state.metadata or {}).get("skip_reason", "")
+                        extra = f"  [dim]({reason})[/dim]" if reason else ""
+                    console.print(
+                        f"  [{status_colour}]{status:<12}[/{status_colour}]  "
+                        f"[bold]{node.kind:<14}[/bold]  {node.name}  [dim]{node.id[:20]}[/dim]{extra}"
+                    )
+                if tg.task_edges:
+                    console.print("  [dim]edges:[/dim]")
+                    for edge in tg.task_edges:
+                        src = node_by_id.get(edge.from_node_id)
+                        dst = node_by_id.get(edge.to_node_id)
+                        branch = edge.metadata.get("branch", "")
+                        dst_state = state_by_node.get(edge.to_node_id)
+                        dst_status = dst_state.status if dst_state else "?"
+                        branch_label = f"  [dim]branch={branch}[/dim]" if branch else ""
+                        pruned = "  [dim](pruned)[/dim]" if dst_status == "skipped" else ""
+                        console.print(
+                            f"    {(src.name if src else edge.from_node_id[:16])}"
+                            f" ──[{edge.from_port}]──▶ [{edge.to_port}]"
+                            f" {(dst.name if dst else edge.to_node_id[:16])}{branch_label}{pruned}"
+                        )
+            continue
+
+        if text == "/run":
+            if last_analysis is None:
+                console.print("[dim]No run yet — run a prompt first.[/dim]")
+            else:
+                node_by_id = {n.id: n for n in last_analysis.task_graph.nodes}
+                console.print(f"[bold]Run[/bold] {last_analysis.run.id}  status={last_analysis.run.status}")
+                for state in last_analysis.node_states:
+                    node = node_by_id.get(state.node_id)
+                    name = node.name if node else state.node_id[:20]
+                    kind = node.kind if node else "?"
+                    status_colour = {"succeeded": "green", "failed": "red", "skipped": "yellow"}.get(state.status, "dim")
+                    line = (
+                        f"  [{status_colour}]{state.status:<12}[/{status_colour}]  "
+                        f"[bold]{kind:<14}[/bold]  {name}"
+                    )
+                    if state.last_error:
+                        line += f"  [red]{str(state.last_error)[:80]}[/red]"
+                    console.print(line)
+                usage = last_analysis.token_usage()
+                console.print(
+                    f"  [dim]tokens: in={usage['input_tokens']}  out={usage['output_tokens']}  "
+                    f"artifacts={usage['artifact_tokens']}[/dim]"
+                )
+            continue
+
         if text.startswith("/inject "):
             note = text[8:].strip()
             if note:
@@ -273,6 +356,7 @@ def main() -> None:
             task_graph_id = app.compile(workspace_id, text)
             run_id = app.run(task_graph_id)
             analysis = app.query_run(run_id)
+            last_analysis = analysis
         except CompilationError as exc:
             console.print(
                 f"[red]Planner failed to compile after {exc.attempts} attempt(s).[/red]"

@@ -2,6 +2,8 @@ FROM python:3.13-alpine
 
 WORKDIR /app
 
+RUN pip install --no-cache-dir "psycopg[binary]"
+
 COPY server.py /app/server.py
 COPY static/ /app/static/
 COPY data/ /app/data/

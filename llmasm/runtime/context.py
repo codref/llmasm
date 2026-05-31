@@ -57,12 +57,13 @@ def select_context(
     budget = int(node.metadata.get("max_input_tokens") or runtime_config.default_context_tokens)
 
     # ── Vector-similarity items (when embeddings are enabled) ──────────────
+    workspace_ids = [run.workspace_graph_id, *runtime_config.reference_workspace_ids]
     vector_items: list[ContextItem] = []
     if runtime_config.embeddings_enabled:
         output = provider.embed([query], {"model": runtime_config.embedding_model})[0]
         vector_matches = embedding_store.search_similar(
             output.vector,
-            {"owner_type": "memory_item", "workspace_graph_id": run.workspace_graph_id},
+            {"owner_type": "memory_item", "workspace_graph_ids": workspace_ids},
             limit=20,
         )
         vector_items = [_match_to_context_item(m, runtime_config.tokenizer) for m in vector_matches]
@@ -70,7 +71,7 @@ def select_context(
     # ── Word-overlap items ─────────────────────────────────────────────────
     text_items: list[ContextItem] = []
     if hasattr(storage, "retrieve_workspace_context"):
-        text_items = storage.retrieve_workspace_context(run.workspace_graph_id, query, budget, {})  # type: ignore[attr-defined]
+        text_items = storage.retrieve_workspace_context(workspace_ids, query, budget, {})  # type: ignore[attr-defined]
 
     # ── Merge: deduplicate by item id, keep highest score ─────────────────
     by_id: dict[str, ContextItem] = {}

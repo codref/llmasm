@@ -30,6 +30,7 @@ from llmasm.graph.validation import (
     validate_edge_compatibility,
     validate_models,
     validate_required_ports,
+    validate_router_nodes,
     validate_schema_refs,
     validate_terminal_node,
     validate_tools,
@@ -125,7 +126,8 @@ class Compiler:
     def _prior_context(self, workspace_graph_id: str, prompt: str) -> list[PriorContext]:
         storage = self.storage
         if hasattr(storage, "retrieve_workspace_context"):
-            items = storage.retrieve_workspace_context(workspace_graph_id, prompt, 800, {})
+            workspace_ids = [workspace_graph_id, *self.runtime_config.reference_workspace_ids]
+            items = storage.retrieve_workspace_context(workspace_ids, prompt, 800, {})
             return [PriorContext(item.kind, item.text) for item in items]
         return []
 
@@ -143,6 +145,7 @@ class Compiler:
         issues.extend(validate_required_ports(graph))
         issues.extend(validate_terminal_node(graph))
         issues.extend(validate_acyclic(graph))
+        issues.extend(validate_router_nodes(graph))
         return issues
 
     def _normalize(

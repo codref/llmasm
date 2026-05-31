@@ -32,7 +32,7 @@ from llmasm.providers.base import LLMProvider
 from llmasm.runtime.context import select_context
 from llmasm.runtime.expansion import ExpansionRequest, apply_expansion
 from llmasm.runtime.scheduler import Scheduler
-from llmasm.schemas import FinalAnswer, NotFound, RawText, Summary
+from llmasm.schemas import FinalAnswer, NotFound, RawText, RoutingDecision, Summary
 from llmasm.storage.base import ContextItem, Storage
 from llmasm.storage.embeddings import EmbeddingStore, NullEmbeddingStore, embed_and_persist
 from llmasm.tools.registry import ToolRegistry
@@ -86,7 +86,15 @@ class Executor:
                     run.status = RunStatus.FAILED
                     run.completed_at = datetime.now(UTC)
                     self.storage.update_run(run)
-                    raise ExecutionError("Run stalled with pending nodes")
+                    graph = self.storage.load_task_graph(run.task_graph_id)
+                    nodes_by_id = {n.id: n for n in graph.nodes}
+                    all_states = self.storage.list_run_node_states(run.id)
+                    state_summary = "; ".join(
+                        f"{nodes_by_id[s.node_id].name}({nodes_by_id[s.node_id].kind})={s.status}"
+                        for s in all_states
+                        if s.node_id in nodes_by_id
+                    )
+                    raise ExecutionError(f"Run stalled with pending nodes. Node states: {state_summary}")
                 run.status = RunStatus.SUCCEEDED
                 run.completed_at = datetime.now(UTC)
                 self.storage.update_run(run)
@@ -151,6 +159,8 @@ class Executor:
         metadata: dict[str, Any] = {}
         if isinstance(output, NotFound):
             metadata["not_found"] = True
+        if isinstance(output, RoutingDecision):
+            metadata["selected_branch"] = output.selected_branch
         self._mark_succeeded(run, node, [artifact.id], metadata)
 
     def _invoke(self, run: Run, node: Node, direct_inputs: dict[str, BaseModel]) -> BaseModel:
@@ -242,9 +252,66 @@ class Executor:
             state.metadata["expansion"] = expansion.model_dump()
             self.storage.update_run_node_state(state)
             return RawText(text=json.dumps(expansion.model_dump(), sort_keys=True))
-        if node.kind in {NodeKind.MEMORY_QUERY, NodeKind.ROUTER, NodeKind.GOAL, NodeKind.OBSERVATION}:
+        if node.kind == NodeKind.ROUTER:
+            return self._invoke_router(run, node, direct_inputs)
+        if node.kind in {NodeKind.MEMORY_QUERY, NodeKind.GOAL, NodeKind.OBSERVATION}:
             raise ExecutionError(f"Unsupported node kind in v0: {node.kind.value}")
         raise ExecutionError(f"Unsupported node kind in v0: {node.kind.value}")
+
+    def _invoke_router(self, run: Run, node: Node, direct_inputs: dict[str, BaseModel]) -> RoutingDecision:
+        mode = node.execution.get("mode", "model")
+        if mode == "deterministic":
+            input_value = next(iter(direct_inputs.values()), None)
+            if isinstance(input_value, NotFound):
+                branch = str(node.execution.get("not_found_branch", "missing"))
+            else:
+                branch = str(node.execution.get("default_branch", "found"))
+            return RoutingDecision(selected_branch=branch)
+        # model-assisted routing
+        branches: list[str] = list(node.execution.get("branches") or [])
+        instruction = (
+            node.metadata.get("instruction")
+            or node.execution.get("prompt_template")
+            or f"Classify the input and select one branch: {branches}"
+        )
+        input_text = ""
+        for v in direct_inputs.values():
+            candidate = getattr(v, "text", None)
+            if candidate:
+                input_text = candidate
+                break
+        if not input_text:
+            input_text = json.dumps(
+                {name: value.model_dump(mode="json") for name, value in sorted(direct_inputs.items())},
+                sort_keys=True,
+            )
+        branches_str = ", ".join(f'"{b}"' for b in branches)
+        prompt = (
+            f"{instruction}\n\n"
+            f"Input: {input_text}\n\n"
+            f"Available branches: [{branches_str}]\n\n"
+            f"Respond with ONLY valid JSON in exactly this format (no prose, no markdown):\n"
+            f'{{"selected_branch": "<branch_name>"}}'
+        )
+        result = self.provider.generate(
+            prompt,
+            {"model": node.execution.get("model") or self.runtime_config.default_model},
+            None,
+        )
+        decision = self._coerce_model_output("RoutingDecision", result.text)
+        self.storage.persist_model_call(
+            ModelCall(
+                id=f"modelcall_{uuid4().hex}",
+                run_id=run.id,
+                node_id=node.id,
+                provider=getattr(self.provider, "name", "provider"),
+                model=str(node.execution.get("model") or self.runtime_config.default_model),
+                prompt_artifact_id="",
+                status="succeeded",
+                token_json=result.token_usage or {},
+            )
+        )
+        return decision  # type: ignore[return-value]
 
     def _gather_inputs(self, run: Run, node: Node) -> tuple[dict[str, BaseModel], list[str]]:
         graph = self.storage.load_task_graph(run.task_graph_id)
@@ -252,10 +319,17 @@ class Executor:
         direct: dict[str, BaseModel] = {}
         input_ids: list[str] = []
         states = {state.node_id: state for state in self.storage.list_run_node_states(run.id)}
+        nodes_by_id = {n.id: n for n in graph.nodes}
         for edge in edges:
+            from_node = nodes_by_id.get(edge.from_node_id)
+            # Router edges are control-only; the RoutingDecision artifact is not
+            # data input for the downstream node — skip it.
+            if from_node and from_node.kind == NodeKind.ROUTER:
+                continue
             state = states.get(edge.from_node_id)
             if not state or not state.output_artifact_ids:
-                if edge.required:
+                # A skipped upstream node means the branch wasn't taken — not an error.
+                if edge.required and (not state or state.status != NodeStatus.SKIPPED):
                     raise ExecutionError(f"Missing required input {edge.to_port}")
                 continue
             artifacts = [self.storage.load_artifact(artifact_id) for artifact_id in state.output_artifact_ids]
@@ -265,8 +339,7 @@ class Executor:
                     json.dumps(artifact.content_json, sort_keys=True, default=str).encode("utf-8")
                 ).hexdigest()
             )
-            from_node = next(item for item in graph.nodes if item.id == edge.from_node_id)
-            value = self._artifact_to_model(from_node.output_schema, artifact.content_json)
+            value = self._artifact_to_model(from_node.output_schema if from_node else None, artifact.content_json)
             if edge.transform:
                 value = self.transform_registry.apply(edge.transform, value, edge.metadata)
             direct[edge.to_port] = value
@@ -292,8 +365,13 @@ class Executor:
 
     def _coerce_model_output(self, schema_ref: str | None, text: str) -> BaseModel:
         model = self._model_for_schema(schema_ref)
+        # Strip markdown code fences if present
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            lines = stripped.splitlines()
+            stripped = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
         try:
-            parsed = json.loads(text)
+            parsed = json.loads(stripped)
             if isinstance(parsed, dict):
                 return model.model_validate(parsed)
         except json.JSONDecodeError:
@@ -304,6 +382,9 @@ class Executor:
             return FinalAnswer(text=text, sources=[])
         if model is RawText:
             return RawText(text=text)
+        if model is RoutingDecision:
+            # Model returned a plain word instead of JSON — treat it as the branch name
+            return RoutingDecision(selected_branch=stripped.strip('"\' \n\t'))
         return model.model_validate({"text": text})
 
     def _intent_raw_text(self, payload: Any, metadata: dict[str, Any]) -> str:

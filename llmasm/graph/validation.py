@@ -88,6 +88,10 @@ def validate_edge_compatibility(
         dst = nodes.get(edge.to_node_id)
         if src is None or dst is None:
             continue
+        # Edges leaving a router are control/branch edges — the RoutingDecision
+        # artifact is not used as data input by the downstream node.
+        if src.kind == NodeKind.ROUTER:
+            continue
         from_schema = _port_schema(src, edge.from_port, "output") or src.output_schema
         to_schema = _port_schema(dst, edge.to_port, "input") or dst.input_schema
         if not from_schema or not to_schema:
@@ -245,3 +249,40 @@ def _port_schema(node: object, name: str, direction: str) -> str | None:
 
 def _has_port(node: object, name: str, direction: str) -> bool:
     return _port_schema(node, name, direction) is not None
+
+
+def validate_router_nodes(task_graph: TaskGraph) -> list[ValidationIssue]:
+    """Validate router node output schema and outgoing edge branch labels."""
+
+    issues: list[ValidationIssue] = []
+    for node in task_graph.nodes:
+        if node.kind != NodeKind.ROUTER:
+            continue
+        if node.output_schema != "RoutingDecision":
+            issues.append(
+                ValidationIssue(
+                    "ROUTER_SCHEMA",
+                    node.name,
+                    f"Router output_schema must be 'RoutingDecision', got '{node.output_schema}'",
+                )
+            )
+        outgoing = [edge for edge in task_graph.task_edges if edge.from_node_id == node.id]
+        unlabelled = [edge for edge in outgoing if not edge.metadata.get("branch")]
+        for edge in unlabelled:
+            issues.append(
+                ValidationIssue(
+                    "ROUTER_UNLABELLED_BRANCH",
+                    node.name,
+                    f"Edge to node '{edge.to_node_id}' is missing metadata['branch']",
+                )
+            )
+        distinct_branches = {edge.metadata.get("branch") for edge in outgoing if edge.metadata.get("branch")}
+        if len(distinct_branches) < 2:
+            issues.append(
+                ValidationIssue(
+                    "ROUTER_SINGLE_BRANCH",
+                    node.name,
+                    "Router has fewer than 2 distinct branch labels; branching has no effect",
+                )
+            )
+    return issues
