@@ -77,6 +77,21 @@ Any other input is compiled into a task graph and executed.
 
 ---
 
+## Available Tools
+
+Chat auto-registers four tools at startup. The planner sees them in its prompt and can generate `tool` nodes.
+
+| Tool name | Input schema | Output schema | Data source |
+|-----------|-------------|---------------|-------------|
+| `wikipedia.search` | `RawText` | `RawText` | [Wikipedia MediaWiki API](https://en.wikipedia.org/w/api.php) (free, no key) |
+| `weather.lookup` | `WeatherQuery` | `WeatherObservation` | [Open-Meteo](https://open-meteo.com) (free, no key) |
+| `calculator.eval` | `RawText` | `RawText` | Python `eval` with restricted `math` namespace |
+| `file.read` | `RawText` | `RawText` | Local filesystem, UTF-8, 1 MB limit |
+
+Each tool returns a result object or an error message — the executor marks the node as `succeeded` either way. Tool caching applies to `calculator.eval` and `file.read` by default (same inputs → cached artifact).
+
+---
+
 ## What happens on each turn
 
 1. **Compile** — the planner model generates a task graph JSON from the prompt and any few-shot examples retrieved from the workspace.  If the graph is invalid, the repair loop runs up to `--compiler-attempts` times.
@@ -247,6 +262,37 @@ python examples/chat.py --db-url ... --embeddings --embedding-dimensions 384 --w
 
 **What to observe:**
 - The second invocation raises `StorageError: embeddings.vector column has 768 dimensions but RuntimeConfig.embedding_dimensions=384` and exits immediately, before any prompt is processed.
+
+---
+
+### 9. Tool-driven turns (Wikipedia + Calculator)
+
+**Purpose:** verify the planner generates tool nodes when tools are registered and the executor invokes them.
+
+Run **without** `--embeddings` (tools work regardless of embedding state).
+
+```
+[0]> When was Alan Turing born?
+
+[1]> What is the factorial of 10?
+
+[2]> /graph
+```
+
+**What to observe:**
+- Turn 0 response includes Turing's birth year (1912) from Wikipedia.
+- Turn 1 response shows `3628800`.
+- `/graph` after turn 2 shows at least one node with `kind=tool` and `status=succeeded`. The tool node may be named `wikipedia.search` or `calculator.eval`.
+- If the planner omits a tool node and answers from the model's own knowledge, the answer should still be correct — the compiler prompt says "If NO tools are listed, do not generate tool nodes", so with tools present the planner should prefer them for retrieval/computation.
+
+*Repeat with the weather tool:*
+```
+[3]> What's the current weather in London?
+```
+
+**What to observe:**
+- If Open-Meteo is reachable, the response includes a temperature and condition (e.g., "15°C, partly cloudy").
+- The footer shows `goal: new` or `goal: continue`.
 
 ---
 

@@ -34,6 +34,11 @@ from llmasm.graph.registry import default_schema_registry
 from llmasm.ids import new_id
 from llmasm.providers.ollama import OllamaProvider
 from llmasm.schemas import FinalAnswer
+from llmasm.tools.calculator import CalculatorTool
+from llmasm.tools.file_reader import FileReaderTool
+from llmasm.tools.registry import ToolRegistry
+from llmasm.tools.weather import WeatherTool
+from llmasm.tools.wikipedia import WikipediaTool
 from llmasm.storage.embeddings import InMemoryEmbeddingStore, NullEmbeddingStore, write_memory_item
 from llmasm.storage.memory import InMemoryStorage
 from llmasm.storage.postgres import PostgresEmbeddingStore, PostgresStorage
@@ -144,9 +149,16 @@ def build_app(args: argparse.Namespace) -> LLMASM:
     storage = _build_storage(args)
     embedding_store = _build_embedding_store(args, storage)
     ref_ids = [_stable_workspace_id(name) for name in (args.ref_workspaces or [])]
+    schema_registry = default_schema_registry()
+    tools = ToolRegistry(schema_registry)
+    tools.register(WikipediaTool())
+    tools.register(WeatherTool())
+    tools.register(CalculatorTool())
+    tools.register(FileReaderTool())
     return LLMASM(
         storage=storage,
         provider=provider,
+        tool_registry=tools,
         runtime_config=RuntimeConfig(
             planner_model=args.planner_model,
             default_model=args.runtime_model,
@@ -156,7 +168,7 @@ def build_app(args: argparse.Namespace) -> LLMASM:
             embeddings_enabled=args.embeddings,
             reference_workspace_ids=ref_ids,
         ),
-        schema_registry=default_schema_registry(),
+        schema_registry=schema_registry,
         embedding_store=embedding_store,
     )
 
