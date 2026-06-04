@@ -125,7 +125,7 @@ class Executor:
         self.storage.update_run_node_state(state)
         direct_inputs, input_artifact_ids = self._gather_inputs(run, node)
         allow_cache = self._allow_cache(node)
-        cache_key = self._cache_key(node)
+        cache_key = self._cache_key(node, run)
         if allow_cache:
             cached = self.storage.find_cached_artifact(cache_key, input_artifact_ids)
             if cached is not None:
@@ -136,6 +136,10 @@ class Executor:
                 return
         output = self._invoke(run, node, direct_inputs)
         output_port = node.output_port_name()
+        output_text = getattr(output, "text", str(output))
+        artifact_meta: dict[str, Any] = {"input_artifact_ids": input_artifact_ids}
+        if not _is_error_output(output_text):
+            artifact_meta["cache_key"] = cache_key
         artifact = Artifact(
             id=new_id("artifact"),
             run_id=run.id,
@@ -143,7 +147,7 @@ class Executor:
             port=output_port,
             content_json=output.model_dump(mode="json"),
             token_count=self.runtime_config.tokenizer.count_tokens(json.dumps(output.model_dump())),
-            metadata={"cache_key": cache_key, "input_artifact_ids": input_artifact_ids},
+            metadata=artifact_meta,
         )
         self.storage.persist_artifact(artifact)
         if node.kind in {NodeKind.MODEL, NodeKind.COMPRESS}:
@@ -178,7 +182,7 @@ class Executor:
                 )
             input_value = self._single_or_model(node.input_schema, direct_inputs)
             start = perf_counter()
-            output = tool.invoke(input_value)
+            output = tool.invoke(input_value, provider=self.provider)
             elapsed = int((perf_counter() - start) * 1000)
             self.storage.persist_tool_call(
                 ToolCall(
@@ -193,6 +197,8 @@ class Executor:
             )
             return output
         if node.kind in {NodeKind.MODEL, NodeKind.COMPRESS}:
+            graph = self.storage.load_task_graph(run.task_graph_id)
+            include_prior = graph.metadata.get("goal_action") != "new"
             selected = select_context(
                 storage=self.storage,
                 runtime_config=self.runtime_config,
@@ -201,6 +207,7 @@ class Executor:
                 direct_inputs=direct_inputs,
                 embedding_store=self.embedding_store,
                 provider=self.provider,
+                include_prior_context=include_prior,
             )
             prompt = self._render_node_prompt(node, selected.direct_inputs, selected.items)
             prompt_artifact = Artifact(
@@ -374,9 +381,17 @@ class Executor:
             parsed = json.loads(stripped)
             if isinstance(parsed, dict):
                 return model.model_validate(parsed)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, Exception):
             pass
         if model is Summary:
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, dict):
+                    for key in ("text", "answer", "result", "response", "output", "summary"):
+                        if key in parsed:
+                            return Summary(text=str(parsed[key]))
+            except json.JSONDecodeError:
+                pass
             return Summary(text=text)
         if model is FinalAnswer:
             return FinalAnswer(text=text, sources=[])
@@ -417,12 +432,38 @@ class Executor:
         )
         if context_items:
             prior = "\n".join(item.text for item in context_items)
-            instruction = (
-                f"{instruction}\n\n"
-                f"--- Prior conversation ---\n{prior}\n---\n\n"
-                f"Use the prior conversation above to resolve references and understand "
-                f"what the question is about. Answer from your own knowledge."
-            )
+            if direct_inputs:
+                input_has_error = any(
+                    getattr(v, "text", "").startswith("Error:") for v in direct_inputs.values()
+                )
+                if input_has_error:
+                    instruction = (
+                        f"{instruction}\n\n"
+                        f"--- Prior conversation (for context only) ---\n{prior}\n---\n\n"
+                        f"Use the prior conversation only to understand what the question is about. "
+                        f"The provided inputs contain an error from a tool — ignore them and "
+                        f"answer from your own knowledge instead."
+                    )
+                else:
+                    instruction = (
+                        f"{instruction}\n\n"
+                        f"--- Prior conversation (for context only) ---\n{prior}\n---\n\n"
+                        f"Use the prior conversation only to understand what the question is about. "
+                        f"Answer using the provided inputs — do not substitute prior conversation "
+                        f"data or your own knowledge."
+                    )
+            else:
+                instruction = (
+                    f"{instruction}\n\n"
+                    f"--- Prior conversation ---\n{prior}\n---\n\n"
+                    f"Use the prior conversation above to resolve references and understand "
+                    f"what the question is about. Answer from your own knowledge."
+                )
+        elif direct_inputs:
+            if instruction == node.name:
+                instruction = "Answer the user's question using the provided inputs."
+            else:
+                instruction = f"{instruction}\n\nAnswer using the provided inputs."
         payload: dict[str, Any] = {
             "instruction": instruction,
             "inputs": {name: value.model_dump(mode="json") for name, value in sorted(direct_inputs.items())},
@@ -491,8 +532,16 @@ class Executor:
         return node.kind == NodeKind.TOOL
 
     @staticmethod
-    def _cache_key(node: Node) -> str:
-        return json.dumps(
-            {"kind": node.kind.value, "name": node.name, "execution": node.execution},
-            sort_keys=True,
-        )
+    def _cache_key(node: Node, run: Run | None = None) -> str:
+        payload: dict[str, Any] = {
+            "kind": node.kind.value,
+            "name": node.name,
+            "execution": node.execution,
+        }
+        if run is not None:
+            payload["workspace"] = run.workspace_graph_id
+        return json.dumps(payload, sort_keys=True)
+
+
+def _is_error_output(text: str) -> bool:
+    return text.startswith("Error:") or text.startswith("Error ") or "error" in text.lower()[:20]

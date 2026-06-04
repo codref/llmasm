@@ -882,6 +882,8 @@ class PostgresEmbeddingStore:
     # ── EmbeddingStore protocol ───────────────────────────────────────────
 
     def persist(self, ref: EmbeddingRef, vector: list[float]) -> None:
+        if not vector:
+            return
         with self.conn.cursor() as cur:
             if self._pgvector:
                 vec_str = "[" + ",".join(str(v) for v in vector) + "]"
@@ -915,6 +917,8 @@ class PostgresEmbeddingStore:
         filters: dict[str, object] | None,
         limit: int,
     ) -> list[ScoredMatch]:
+        if not query_vector:
+            return []
         filters = filters or {}
         owner_type = str(filters["owner_type"]) if filters.get("owner_type") else None
         # Accept either workspace_graph_ids (list) or workspace_graph_id (single).

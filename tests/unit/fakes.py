@@ -56,7 +56,7 @@ class ConversationRetrieveTool:
             output_schema="ConversationRecord",
         )
 
-    def invoke(self, input: BaseModel) -> BaseModel:
+    def invoke(self, input: BaseModel, provider: Any = None) -> BaseModel:
         self.calls += 1
         text = getattr(input, "text", "")
         return ConversationRecord(

@@ -262,6 +262,7 @@ class Compiler:
             output_schema = output_schema or "FinalAnswer"
         if proposed.kind in {NodeKind.MODEL, NodeKind.COMPRESS}:
             input_schema = input_schema or "RawText"
+            output_schema = output_schema or "Summary"
         if proposed.kind == NodeKind.TOOL:
             tool_name = execution.get("tool")
             if not tool_name:
@@ -290,6 +291,20 @@ class Compiler:
             return matches[0]
         if len(tool_names) == 1:
             return tool_names[0]
+        node_tokens = set(normalized_node.split("_"))
+        for name in tool_names:
+            tool_tokens = set(self._normalized_tool_alias(name).split("_"))
+            if node_tokens & tool_tokens:
+                return name
+        for name in tool_names:
+            for tool_token in self._normalized_tool_alias(name).split("_"):
+                for node_token in normalized_node.split("_"):
+                    if len(node_token) >= 3 and len(tool_token) >= 3 and node_token in tool_token:
+                        return name
+        for name in tool_names:
+            norm = self._normalized_tool_alias(name)
+            if normalized_node in norm or norm in normalized_node:
+                return name
         return None
 
     def _normalized_tool_alias(self, value: str) -> str:

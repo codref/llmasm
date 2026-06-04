@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import httpx
+from typing import Any
+
 from pydantic import BaseModel
 
 from llmasm.schemas import WeatherObservation, WeatherQuery
@@ -24,7 +26,7 @@ class WeatherTool:
             output_schema="WeatherObservation",
         )
 
-    def invoke(self, input: BaseModel) -> BaseModel:
+    def invoke(self, input: BaseModel, provider: Any = None) -> BaseModel:
         if not isinstance(input, WeatherQuery):
             return WeatherObservation(
                 condition=f"Unexpected input type: {type(input).__name__}",

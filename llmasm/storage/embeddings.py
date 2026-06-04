@@ -122,6 +122,8 @@ def embed_and_persist(
     if embedding_store.has_embedding(owner_type, owner_id, text_hash):
         return embedding_store.find_by_owner(owner_type, owner_id)
     output = provider.embed([text], {"model": runtime_config.embedding_model})[0]
+    if not output.vector:
+        return None
     ref = EmbeddingRef(
         id=new_id("memory"),
         owner_type=owner_type,  # type: ignore[arg-type]

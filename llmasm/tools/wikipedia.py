@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import httpx
+from typing import Any
+
 from pydantic import BaseModel
 
 from llmasm.schemas import RawText
@@ -10,6 +12,7 @@ from llmasm.tools.base import ToolSpec
 
 _SEARCH_URL = "https://en.wikipedia.org/w/api.php"
 _TIMEOUT = 10.0
+_HEADERS = {"User-Agent": "llmasm/0.1.0 (https://github.com/codref/llmasm)"}
 
 
 class WikipediaTool:
@@ -23,7 +26,7 @@ class WikipediaTool:
             output_schema="RawText",
         )
 
-    def invoke(self, input: BaseModel) -> BaseModel:
+    def invoke(self, input: BaseModel, provider: Any = None) -> BaseModel:
         query = getattr(input, "text", str(input)).strip()
         if not query:
             return RawText(text="No query provided.")
@@ -47,7 +50,7 @@ class WikipediaTool:
             "format": "json",
             "srlimit": 3,
         }
-        response = httpx.get(_SEARCH_URL, params=params, timeout=_TIMEOUT)
+        response = httpx.get(_SEARCH_URL, params=params, headers=_HEADERS, timeout=_TIMEOUT)
         response.raise_for_status()
         data = response.json()
         return list(data.get("query", {}).get("search", []))
@@ -61,7 +64,7 @@ class WikipediaTool:
             "titles": title,
             "format": "json",
         }
-        response = httpx.get(_SEARCH_URL, params=params, timeout=_TIMEOUT)
+        response = httpx.get(_SEARCH_URL, params=params, headers=_HEADERS, timeout=_TIMEOUT)
         response.raise_for_status()
         pages = response.json().get("query", {}).get("pages", {})
         for page in pages.values():

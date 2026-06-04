@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -23,7 +24,7 @@ class FileReaderTool:
             output_schema="RawText",
         )
 
-    def invoke(self, input: BaseModel) -> BaseModel:
+    def invoke(self, input: BaseModel, provider: Any = None) -> BaseModel:
         path_str = getattr(input, "text", str(input)).strip()
         if not path_str:
             return RawText(text="No file path provided.")

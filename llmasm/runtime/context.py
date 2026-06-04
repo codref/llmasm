@@ -44,8 +44,12 @@ def select_context(
     direct_inputs: dict[str, BaseModel],
     embedding_store: EmbeddingStore,
     provider: LLMProvider,
+    include_prior_context: bool = True,
 ) -> SelectedContext:
     """Select context with direct inputs first, then relevant workspace memory."""
+
+    if not include_prior_context:
+        return SelectedContext(items=[], direct_inputs=direct_inputs)
 
     query = " ".join(
         [
@@ -61,12 +65,13 @@ def select_context(
     vector_items: list[ContextItem] = []
     if runtime_config.embeddings_enabled:
         output = provider.embed([query], {"model": runtime_config.embedding_model})[0]
-        vector_matches = embedding_store.search_similar(
-            output.vector,
-            {"owner_type": "memory_item", "workspace_graph_ids": workspace_ids},
-            limit=20,
-        )
-        vector_items = [_match_to_context_item(m, runtime_config.tokenizer) for m in vector_matches]
+        if output.vector:
+            vector_matches = embedding_store.search_similar(
+                output.vector,
+                {"owner_type": "memory_item", "workspace_graph_ids": workspace_ids},
+                limit=20,
+            )
+            vector_items = [_match_to_context_item(m, runtime_config.tokenizer) for m in vector_matches]
 
     # ── Word-overlap items ─────────────────────────────────────────────────
     text_items: list[ContextItem] = []

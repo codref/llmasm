@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Any, Protocol
 
 from pydantic import BaseModel
 
@@ -22,5 +22,5 @@ class Tool(Protocol):
     def spec(self) -> ToolSpec:
         """Return the tool specification."""
 
-    def invoke(self, input: BaseModel) -> BaseModel:
-        """Invoke the tool."""
+    def invoke(self, input: BaseModel, provider: Any = None) -> BaseModel:
+        """Invoke the tool.  *provider* is the active LLM provider, if available."""

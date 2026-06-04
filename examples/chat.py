@@ -177,7 +177,7 @@ def main() -> None:
     args = parse_args()
     console = Console()
 
-    if args.fresh and args.db_url:
+    if args.fresh:
         import time
         args.workspace_name = f"{args.workspace_name}_{int(time.time())}"
 

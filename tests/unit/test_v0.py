@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 from pydantic import BaseModel
@@ -32,7 +34,7 @@ class RawSearchTool:
             output_schema="RawText",
         )
 
-    def invoke(self, input: BaseModel) -> BaseModel:
+    def invoke(self, input: BaseModel, provider: Any = None) -> BaseModel:
         return input
 
 
@@ -282,6 +284,62 @@ def test_compiler_synthesizes_simple_qa_chain_edges() -> None:
     assert len(graph.task_edges) == 3
 
 
+def test_compiler_defaults_model_output_schema() -> None:
+    """Model nodes without explicit output_schema should default to Summary."""
+    schemas = default_schema_registry()
+    tools = ToolRegistry(schemas)
+    tools.register(RawSearchTool())
+    provider = FakeProvider(
+        [
+            """
+{
+  "intent": "answer a factual question",
+  "goal_action": "new",
+  "nodes": [
+    {
+      "name": "intent",
+      "kind": "intent",
+      "output_schema": "RawText",
+      "metadata": {"output": {"text": "question"}}
+    },
+    {
+      "name": "search",
+      "kind": "tool",
+      "input_schema": "RawText",
+      "output_schema": "RawText",
+      "execution": {"tool": "raw.search"}
+    },
+    {
+      "name": "answer",
+      "kind": "model",
+      "input_schema": "RawText"
+    },
+    {
+      "name": "final",
+      "kind": "final"
+    }
+  ],
+  "edges": [
+    {"from_node": "intent", "to_node": "search"},
+    {"from_node": "search", "to_node": "answer"},
+    {"from_node": "answer", "to_node": "final"}
+  ]
+}
+"""
+        ],
+        model_text="Answer text.",
+    )
+    storage = InMemoryStorage()
+    app = LLMASM(storage=storage, provider=provider, tool_registry=tools, schema_registry=schemas)
+    workspace_id = app.create_workspace("test")
+
+    task_graph_id = app.compile(workspace_id, "question")
+    graph = storage.load_task_graph(task_graph_id)
+    model_node = next(node for node in graph.nodes if node.kind == NodeKind.MODEL)
+
+    assert model_node.output_schema == "Summary"
+
+
 def test_compiler_repair_persists_failure() -> None:
     schemas = default_schema_registry()
     tools = ToolRegistry(schemas)
@@ -386,6 +444,52 @@ def test_executor_accepts_planner_intent_text_variants() -> None:
 
     assert executor._intent_raw_text("text", {"text": "question text"}) == "question text"
     assert executor._intent_raw_text({"output.text": "question text"}, {}) == "question text"
+
+
+def test_render_node_prompt_prioritises_inputs_over_prior_context() -> None:
+    """When direct_inputs exist, the prompt must tell the model to use inputs, not prior context."""
+    import json
+
+    from llmasm.graph.models import MemoryItem
+    from llmasm.schemas import RawText
+    from llmasm.storage.base import ContextItem
+
+    schemas = default_schema_registry()
+    executor = Executor(
+        storage=InMemoryStorage(),
+        tool_registry=ToolRegistry(schemas),
+        provider=FakeProvider(),
+        schema_registry=schemas,
+        transform_registry=default_transform_registry(),
+        runtime_config=RuntimeConfig(),
+    )
+    node = Node(
+        id="node_model",
+        workspace_graph_id="ws",
+        task_graph_id="tg",
+        kind=NodeKind.MODEL,
+        name="answer_model",
+        input_schema="RawText",
+        output_schema="Summary",
+        metadata={"instruction": "Answer the user question"},
+    )
+    direct_inputs = {"input": RawText(text="3628800")}
+    context_items = [
+        ContextItem(
+            id="mem_1",
+            kind="memory_item",
+            text="Q: When was Alan Turing born?\nA: 1912",
+            score=0.0,
+            token_count=10,
+            item=MemoryItem(id="mem_1", workspace_graph_id="ws", kind="turn", text="Q: When was Alan Turing born?\nA: 1912"),
+        )
+    ]
+
+    prompt = executor._render_node_prompt(node, direct_inputs, context_items)
+    parsed = json.loads(prompt)
+
+    assert "do not substitute prior conversation" in parsed["instruction"].lower()
+    assert "1912" not in parsed["inputs"]["input"]["text"]
 
 
 def test_select_context_vector_path_returns_memory_items() -> None:
