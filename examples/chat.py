@@ -107,6 +107,24 @@ def parse_args() -> argparse.Namespace:
         metavar="DSN",
         help="PostgreSQL DSN for persistent storage, e.g. postgresql://llmasm:llmasm@localhost:15432/llmasm",
     )
+    parser.add_argument(
+        "--llm-goal-classifier",
+        action="store_true",
+        default=False,
+        help="Use the planner model to classify goal actions instead of heuristics",
+    )
+    parser.add_argument(
+        "--llm-context-filter",
+        action="store_true",
+        default=False,
+        help="Use the runtime model to filter retrieved context items for relevance before each node",
+    )
+    parser.add_argument(
+        "--input-file",
+        default=None,
+        metavar="PATH",
+        help="Path to a file with one question per line. Runs all turns then exits (no REPL).",
+    )
     return parser.parse_args()
 
 
@@ -155,6 +173,8 @@ def build_app(args: argparse.Namespace) -> LLMASM:
             embedding_dimensions=args.embedding_dimensions,
             embeddings_enabled=args.embeddings,
             reference_workspace_ids=ref_ids,
+            llm_goal_classifier=args.llm_goal_classifier,
+            llm_context_filter=args.llm_context_filter,
         ),
         schema_registry=default_schema_registry(),
         embedding_store=embedding_store,
@@ -197,6 +217,93 @@ def main() -> None:
         )
     )
     console.print("─" * console.width, style="dim")
+
+    # ── File-driven mode ────────────────────────────────────────────────────
+    if args.input_file is not None:
+        questions = Path(args.input_file).read_text().splitlines()
+        questions = [q.strip() for q in questions if q.strip()]
+        prev_task_graph_id: str | None = None
+        prev_final_node_id: str | None = None
+        for turn_idx, question in enumerate(questions):
+            console.print(f"[dim][{turn_idx}]>[/dim] {question}")
+            console.print()
+            try:
+                task_graph_id = app.compile(workspace_id, question)
+                run_id = app.run(task_graph_id)
+                analysis = app.query_run(run_id)
+            except CompilationError as exc:
+                console.print(f"[red]Planner failed after {exc.attempts} attempt(s).[/red]")
+                if exc.last_errors:
+                    console.print(f"[red]Last errors: {exc.last_errors}[/red]")
+                prev_task_graph_id = None
+                prev_final_node_id = None
+                console.print()
+                continue
+            except LLMASMError as exc:
+                console.print(f"[red]Error: {exc}[/red]")
+                prev_task_graph_id = None
+                prev_final_node_id = None
+                console.print()
+                continue
+
+            final_id = _final_node_id(analysis)
+            answer = _extract_answer(analysis, final_id)
+
+            if answer.text:
+                console.print(Markdown(answer.text))
+                if answer.sources:
+                    console.print(f"[dim]sources: {answer.sources}[/dim]")
+            else:
+                console.print("[dim](no output)[/dim]")
+
+            goal_action = analysis.task_graph.metadata.get("goal_action", "")
+            tg_short = task_graph_id.split("_")[-1][:12]
+            console.print(f"[dim]── turn {turn_idx}  |  goal: {goal_action}  |  tg: {tg_short}[/dim]")
+
+            memory = write_memory_item(
+                workspace_graph_id=workspace_id,
+                kind="turn",
+                text=f"Q: {question}\nA: {answer.text}",
+                runtime_config=app.runtime_config,
+                provider=app.provider,
+                embedding_store=app.embedding_store,
+                storage=storage,
+                source_run_id=run_id,
+            )
+
+            if prev_task_graph_id is not None:
+                storage.persist_workspace_edge(
+                    WorkspaceEdge(
+                        id=new_id("edge"),
+                        workspace_graph_id=workspace_id,
+                        edge_type=WorkspaceEdgeType.FOLLOWS_UP,
+                        from_type="task_graph",
+                        from_id=task_graph_id,
+                        to_type="task_graph",
+                        to_id=prev_task_graph_id,
+                        reason=f"turn {turn_idx} follows turn {turn_idx - 1}",
+                    )
+                )
+
+            if final_id is not None:
+                storage.persist_workspace_edge(
+                    WorkspaceEdge(
+                        id=new_id("edge"),
+                        workspace_graph_id=workspace_id,
+                        edge_type=WorkspaceEdgeType.PRODUCED,
+                        from_type="node",
+                        from_id=final_id,
+                        to_type="memory_item",
+                        to_id=memory.id,
+                        reason="final node answer stored as workspace memory",
+                    )
+                )
+
+            prev_task_graph_id = task_graph_id
+            prev_final_node_id = final_id
+            console.print()
+        return
+    # ── Interactive REPL ────────────────────────────────────────────────────
 
     session: PromptSession[str] = PromptSession(history=InMemoryHistory())
     previous_task_graph_id: str | None = None

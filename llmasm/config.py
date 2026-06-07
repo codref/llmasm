@@ -23,3 +23,6 @@ class RuntimeConfig:
     embedding_dimensions: int = 768
     embeddings_enabled: bool = False
     reference_workspace_ids: list[str] = field(default_factory=list)
+    llm_goal_classifier: bool = False
+    context_min_score: float = 0.05
+    llm_context_filter: bool = False

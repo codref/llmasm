@@ -174,6 +174,34 @@ def validate_terminal_node(task_graph: TaskGraph) -> list[ValidationIssue]:
     return [ValidationIssue("NO_TERMINAL_NODE", None, "Task graph has no final node")]
 
 
+_V0_SUPPORTED_KINDS = {
+    NodeKind.INTENT,
+    NodeKind.TOOL,
+    NodeKind.MODEL,
+    NodeKind.COMPRESS,
+    NodeKind.ROUTER,
+    NodeKind.EXPAND,
+    NodeKind.FINAL,
+}
+
+
+def validate_supported_node_kinds(task_graph: TaskGraph) -> list[ValidationIssue]:
+    """Reject node kinds not implemented by the v0 executor."""
+
+    issues = []
+    for node in task_graph.nodes:
+        if node.kind not in _V0_SUPPORTED_KINDS:
+            issues.append(
+                ValidationIssue(
+                    "UNSUPPORTED_NODE_KIND",
+                    node.name,
+                    f'"{node.kind}" is not supported; use one of: '
+                    + ", ".join(sorted(k.value for k in _V0_SUPPORTED_KINDS)),
+                )
+            )
+    return issues
+
+
 def validate_acyclic(task_graph: TaskGraph) -> list[ValidationIssue]:
     """Validate task edges form a DAG."""
 

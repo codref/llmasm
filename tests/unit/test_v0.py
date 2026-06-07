@@ -8,7 +8,9 @@ from llmasm.api import LLMASM
 from llmasm.analysis.visualize import to_dot, to_mermaid, to_viewer_graph
 from llmasm.compiler.parser import parse_task_graph_proposal
 from llmasm.config import RuntimeConfig
-from llmasm.goals.classifier import classify_goal_action
+from llmasm.goals.classifier import classify_goal_action, classify_goal_action_llm, GoalClassification
+from llmasm.runtime.context import ContextRelevanceFilter, filter_context_with_llm
+from llmasm.storage.base import ContextItem
 from llmasm.graph.models import Goal, Node, NodeKind, Run, RunStatus, TaskGraph, WorkspaceGraph
 from llmasm.graph.registry import default_schema_registry
 from llmasm.graph.transforms import default_transform_registry
@@ -135,6 +137,66 @@ def test_goal_classifier() -> None:
     assert classify_goal_action("now check the weather", active) == "continue"
     assert classify_goal_action("actually focus on weather", active) == "steer"
     assert classify_goal_action("new task unrelated", active) == "new"
+
+
+def test_goal_classifier_llm_happy_path() -> None:
+    """LLM classifier returns the action emitted by the provider."""
+    import json
+
+    active = Goal(id="goal_1", workspace_graph_id="workspace_1", text="understand neural networks")
+    # Provider returns a valid GoalClassification JSON
+    provider = FakeProvider(
+        planner_outputs=[
+            json.dumps({"action": "continue", "reason": "This is a follow-up question."})
+        ]
+    )
+    result = classify_goal_action_llm(
+        "Can you explain backpropagation in more detail?",
+        active,
+        provider,
+        {"model": "fake-model"},
+    )
+    assert result == "continue"
+
+
+def test_goal_classifier_llm_fallback_on_bad_json() -> None:
+    """LLM classifier falls back to deterministic classifier when provider returns garbage."""
+    active = Goal(id="goal_1", workspace_graph_id="workspace_1", text="summarize conversation")
+    provider = FakeProvider(planner_outputs=["not valid json at all !!!"])
+    # Deterministic fallback: "new task" signal → NEW
+    result = classify_goal_action_llm("new task: something unrelated", active, provider)
+    assert result == "new"
+
+
+def _make_ctx_item(id: str, text: str) -> ContextItem:
+    return ContextItem(id=id, kind="memory_item", text=text, score=0.5, token_count=10, item=object())
+
+
+def test_llm_context_filter_happy_path() -> None:
+    """LLM context filter keeps only the IDs the model declares relevant."""
+    import json
+
+    candidates = [
+        _make_ctx_item("m1", "Q: backpropagation? A: ..."),
+        _make_ctx_item("m2", "Q: speed of light? A: ..."),
+        _make_ctx_item("m3", "Q: learning rate? A: ..."),
+    ]
+    provider = FakeProvider(
+        planner_outputs=[json.dumps({"relevant_ids": ["m1", "m3"]})]
+    )
+    result = filter_context_with_llm("explain backpropagation", candidates, provider)
+    assert [item.id for item in result] == ["m1", "m3"]
+
+
+def test_llm_context_filter_fallback_on_bad_json() -> None:
+    """LLM context filter returns all candidates when the provider returns garbage."""
+    candidates = [
+        _make_ctx_item("m1", "some text"),
+        _make_ctx_item("m2", "other text"),
+    ]
+    provider = FakeProvider(planner_outputs=["not json"])
+    result = filter_context_with_llm("query", candidates, provider)
+    assert [item.id for item in result] == ["m1", "m2"]
 
 
 def test_compile_execute_and_analyze_v0() -> None:

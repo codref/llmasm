@@ -10,7 +10,7 @@ from llmasm.compiler.proposal import ProposalEdge, ProposalNode, TaskGraphPropos
 from llmasm.compiler.repair import compile_with_repair
 from llmasm.config import RuntimeConfig
 from llmasm.errors import CompilationError
-from llmasm.goals.classifier import classify_goal_action
+from llmasm.goals.classifier import classify_goal_action, classify_goal_action_llm
 from llmasm.goals.tracker import GoalTracker
 from llmasm.graph.models import (
     GoalAction,
@@ -32,6 +32,7 @@ from llmasm.graph.validation import (
     validate_required_ports,
     validate_router_nodes,
     validate_schema_refs,
+    validate_supported_node_kinds,
     validate_terminal_node,
     validate_tools,
 )
@@ -67,7 +68,15 @@ class Compiler:
 
         self.storage.load_workspace_graph(workspace_graph_id)
         active_goal = self.goal_tracker.load_active_goal(workspace_graph_id)
-        goal_action = classify_goal_action(prompt, active_goal)
+        if self.runtime_config.llm_goal_classifier:
+            goal_action = classify_goal_action_llm(
+                prompt,
+                active_goal,
+                self.planner,
+                {"model": self.runtime_config.planner_model},
+            )
+        else:
+            goal_action = classify_goal_action(prompt, active_goal)
         goal = (
             self.goal_tracker.create_provisional_goal(workspace_graph_id, prompt)
             if goal_action == GoalAction.NEW
@@ -141,6 +150,7 @@ class Compiler:
         issues.extend(validate_edge_compatibility(graph, self.transform_registry))
         issues.extend(validate_tools(graph, self.tool_registry))
         issues.extend(validate_models(graph, self.planner.list_models()))
+        issues.extend(validate_supported_node_kinds(graph))
         issues.extend(validate_context_budgets(graph))
         issues.extend(validate_required_ports(graph))
         issues.extend(validate_terminal_node(graph))
@@ -169,7 +179,31 @@ class Compiler:
             )
             proposal_nodes = [prompt_node, *proposal.nodes]
         else:
-            proposal_nodes = proposal.nodes
+            proposal_nodes = list(proposal.nodes)
+        proposal_edges = list(proposal.edges)
+        if not any(node.kind == NodeKind.FINAL for node in proposal_nodes):
+            # Auto-inject a final node, mirroring intent auto-injection.
+            # Find the sink: a model/compress node with no outgoing edges.
+            named = {node.name for node in proposal_nodes}
+            has_outgoing = {edge.from_node for edge in proposal_edges if edge.to_node in named}
+            sink = next(
+                (
+                    node for node in reversed(proposal_nodes)
+                    if node.kind in {NodeKind.MODEL, NodeKind.COMPRESS}
+                    and node.name not in has_outgoing
+                ),
+                None,
+            )
+            final_node = ProposalNode(
+                name="final",
+                kind=NodeKind.FINAL,
+                input_schema=sink.output_schema if sink is not None else None,
+                output_schema="FinalAnswer",
+            )
+            proposal_nodes.append(final_node)
+            if sink is not None:
+                proposal_edges.append(ProposalEdge(from_node=sink.name, to_node="final"))
+            proposal = proposal.model_copy(update={"edges": proposal_edges})
         for proposed in proposal_nodes:
             node_id = f"node_{proposed.name}" if dry_run else new_id("node")
             name_to_id[proposed.name] = node_id
@@ -215,7 +249,7 @@ class Compiler:
                 metadata={**metadata, "proposal_name": proposed.name},
             )
             nodes.append(node)
-        proposal_edges = self._canonical_edges(proposal_nodes, proposal.edges)
+        canonical_edges = self._canonical_edges(proposal_nodes, proposal_edges)
         edges = [
             TaskEdge(
                 id=f"edge_{edge.from_node}_{edge.to_node}" if dry_run else new_id("edge"),
@@ -229,7 +263,7 @@ class Compiler:
                 required=edge.required,
                 metadata=edge.metadata,
             )
-            for edge in proposal_edges
+            for edge in canonical_edges
             if edge.from_node in name_to_id and edge.to_node in name_to_id
         ]
         metadata: dict[str, Any] = {
@@ -256,12 +290,13 @@ class Compiler:
         input_schema = proposed.input_schema or self._metadata_string(metadata, "input_schema")
         output_schema = proposed.output_schema or self._metadata_string(metadata, "output_schema")
         if proposed.kind == NodeKind.INTENT:
-            output_schema = output_schema or "RawText"
+            output_schema = "RawText"  # always; planner must not override
         if proposed.kind == NodeKind.FINAL:
             input_schema = input_schema or "Summary"
-            output_schema = output_schema or "FinalAnswer"
+            output_schema = "FinalAnswer"  # always; planner must not override
         if proposed.kind in {NodeKind.MODEL, NodeKind.COMPRESS}:
             input_schema = input_schema or "RawText"
+            output_schema = output_schema or "Summary"
         if proposed.kind == NodeKind.TOOL:
             tool_name = execution.get("tool")
             if not tool_name:
@@ -307,6 +342,21 @@ class Compiler:
         tool = self._single_node(nodes, NodeKind.TOOL)
         model = self._single_node(nodes, NodeKind.MODEL)
         final = self._single_node(nodes, NodeKind.FINAL)
+
+        # No-tool linear path: intent → model → final
+        # Strip all edges between the three canonical nodes and re-wire cleanly
+        # to guard against any planner-emitted backwards/wrong edges.
+        if intent and not tool and model and final:
+            node_names = {intent.name, model.name, final.name}
+            canonical = [
+                edge for edge in canonical
+                if not (edge.from_node in node_names and edge.to_node in node_names)
+            ]
+            self._ensure_edge(canonical, intent.name, model.name)
+            self._ensure_edge(canonical, model.name, final.name)
+            return canonical
+
+        # Full tool path: intent → tool → model → final (only when all four present)
         if not (intent and tool and model and final):
             return canonical
         tool_input, tool_output, _, _ = self._canonical_node_fields(tool)
