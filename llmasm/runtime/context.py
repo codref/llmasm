@@ -59,7 +59,7 @@ def filter_context_with_llm(
             ContextRelevanceFilter.model_json_schema(),
         )
         raw = str(getattr(output, "text", output)).strip()
-        result = ContextRelevanceFilter.model_validate(json.loads(raw))
+        result = ContextRelevanceFilter.model_validate_json(raw)
         kept_ids = set(result.relevant_ids)
         kept = [item for item in batch if item.id in kept_ids]
         # Append any items beyond the batch limit unchanged (they weren't reviewed)

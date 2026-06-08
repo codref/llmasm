@@ -11,6 +11,7 @@ from llmasm.graph.transforms import TransformRegistry, default_transform_registr
 from llmasm.ids import new_id
 from llmasm.providers.base import LLMProvider
 from llmasm.runtime.executor import Executor
+from llmasm.conversation.chat import chat_turn
 from llmasm.schemas import FinalAnswer
 from llmasm.storage.base import Storage
 from llmasm.storage.embeddings import EmbeddingStore
@@ -96,6 +97,39 @@ class LLMASM:
         if not artifacts:
             return FinalAnswer(text="", sources=[])
         return FinalAnswer.model_validate(artifacts[-1].content_json)
+
+    def chat(
+        self,
+        workspace_id: str,
+        prompt: str,
+        *,
+        out_info: dict[str, Any] | None = None,
+        turn: int | None = None,
+    ) -> FinalAnswer:
+        """Conversation fast path: compile and execute without planner.
+
+        Creates a deterministic ``intent -> model -> final`` graph, applies
+        strict grounded-QA rules when source passages exist, and stores
+        structured conversation memory.
+
+        Args:
+            out_info: Optional dict that will be populated with metadata about
+                the turn, including ``instruction_tokens`` and ``run_id``.
+            turn: Optional turn number for structured memory tracking.
+        """
+        return chat_turn(
+            workspace_graph_id=workspace_id,
+            prompt=prompt,
+            storage=self.storage,
+            provider=self.provider,
+            runtime_config=self.runtime_config,
+            tool_registry=self.tool_registry,
+            schema_registry=self.schema_registry,
+            transform_registry=self.transform_registry,
+            embedding_store=self.embedding_store,
+            out_info=out_info,
+            turn=turn,
+        )
 
     def query_run(self, run_id: str) -> RunAnalysis:
         """Return a materialized run analysis."""

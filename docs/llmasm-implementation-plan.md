@@ -313,8 +313,9 @@ Goal: implement deterministic goal classification and lifecycle management.
 Implementation tasks:
 
 - Add `llmasm/goals/classifier.py`:
-  - `classify_goal_action(prompt: str, active_goal: Goal | None) -> GoalAction`;
-  - implement the RFC keyword and word-overlap heuristic.
+  - `classify_goal_action(prompt, active_goal, storage=None, workspace_graph_id=None, context_depth=3)`;
+  - `classify_goal_action_llm(..., max_goal_chars=400)` with the same optional context parameters;
+  - implement the RFC keyword and word-overlap heuristic enriched with recent workspace memory items.
 - Add `llmasm/goals/tracker.py`:
   - `load_active_goal(workspace_graph_id)`;
   - `create_provisional_goal(workspace_graph_id, prompt)`;
@@ -324,7 +325,7 @@ Implementation tasks:
   - this layer may be a thin wrapper over storage.
 - For `new`, create provisional goal before planner call and finalize after accepted proposal.
 - For `steer`, update the existing active goal after accepted proposal.
-- For `continue`, do not change goal text.
+- For `continue`, append the user prompt to the active goal text so the goal stays current for future classifications.
 
 Acceptance criteria:
 

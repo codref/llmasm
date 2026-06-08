@@ -23,8 +23,7 @@ def parse_task_graph_proposal(raw: str) -> ParseResult:
     """Parse planner JSON into a proposal model."""
 
     try:
-        data = json.loads(_extract_json(raw))
-        return ParseResult(TaskGraphProposal.model_validate(data), [])
+        return ParseResult(TaskGraphProposal.model_validate_json(_extract_json(raw)), [])
     except (json.JSONDecodeError, PydanticValidationError) as exc:
         return ParseResult(None, [ValidationIssue("PARSE_FAILURE", None, str(exc))])
 

@@ -24,5 +24,13 @@ class RuntimeConfig:
     embeddings_enabled: bool = False
     reference_workspace_ids: list[str] = field(default_factory=list)
     llm_goal_classifier: bool = False
+    classifier_context_depth: int = 3
+    classifier_goal_text_chars: int = 400
     context_min_score: float = 0.05
     llm_context_filter: bool = False
+    conversation_fast_path: bool = True
+    grounded_qa_strict: bool = True
+    chat_embeddings_enabled: bool = False
+    chat_qa_truncate_chars: int | None = None
+    llm_query_rewrite: bool = False
+    llm_dialogue_classifier: bool = False

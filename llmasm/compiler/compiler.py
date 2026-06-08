@@ -74,9 +74,19 @@ class Compiler:
                 active_goal,
                 self.planner,
                 {"model": self.runtime_config.planner_model},
+                self.storage,
+                workspace_graph_id,
+                self.runtime_config.classifier_context_depth,
+                self.runtime_config.classifier_goal_text_chars,
             )
         else:
-            goal_action = classify_goal_action(prompt, active_goal)
+            goal_action = classify_goal_action(
+                prompt,
+                active_goal,
+                self.storage,
+                workspace_graph_id,
+                self.runtime_config.classifier_context_depth,
+            )
         goal = (
             self.goal_tracker.create_provisional_goal(workspace_graph_id, prompt)
             if goal_action == GoalAction.NEW
@@ -130,6 +140,8 @@ class Compiler:
                 )
             elif goal_action == GoalAction.STEER:
                 self.goal_tracker.steer_goal(goal.id, proposal.goal_update_text or goal.text)
+            elif goal_action == GoalAction.CONTINUE:
+                self.goal_tracker.continue_goal(goal.id, proposal.goal_update_text or prompt)
         return task_graph.id
 
     def _prior_context(self, workspace_graph_id: str, prompt: str) -> list[PriorContext]:

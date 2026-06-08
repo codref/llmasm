@@ -11,7 +11,7 @@ from llmasm.config import RuntimeConfig
 from llmasm.goals.classifier import classify_goal_action, classify_goal_action_llm, GoalClassification
 from llmasm.runtime.context import ContextRelevanceFilter, filter_context_with_llm
 from llmasm.storage.base import ContextItem
-from llmasm.graph.models import Goal, Node, NodeKind, Run, RunStatus, TaskGraph, WorkspaceGraph
+from llmasm.graph.models import Goal, MemoryItem, Node, NodeKind, Run, RunStatus, TaskGraph, WorkspaceGraph
 from llmasm.graph.registry import default_schema_registry
 from llmasm.graph.transforms import default_transform_registry
 from llmasm.graph.validation import validate_required_ports, validate_tools
@@ -166,6 +166,55 @@ def test_goal_classifier_llm_fallback_on_bad_json() -> None:
     # Deterministic fallback: "new task" signal → NEW
     result = classify_goal_action_llm("new task: something unrelated", active, provider)
     assert result == "new"
+
+
+def test_goal_classifier_with_context() -> None:
+    """Heuristic classifier uses recent memory items to classify short follow-ups as CONTINUE."""
+    from llmasm.storage.memory import InMemoryStorage
+
+    storage = InMemoryStorage()
+    workspace_id = "workspace_1"
+    storage.create_workspace_graph(WorkspaceGraph(id=workspace_id, name="test"))
+
+    active = Goal(id="goal_1", workspace_graph_id=workspace_id, text="read passage")
+    storage.persist_goal(active)
+
+    # Without context, a short question has no overlap with the stale goal → NEW
+    assert classify_goal_action("How large is the population?", active) == "new"
+
+    # With a recent memory item containing the passage, word overlap raises it to CONTINUE
+    storage.persist_memory_item(
+        MemoryItem(
+            id="memory_1",
+            workspace_graph_id=workspace_id,
+            kind="turn",
+            text="Q: Staten Island has a population of 476,015...\nA: I have read the passage.",
+        )
+    )
+    result = classify_goal_action(
+        "How large is the population?",
+        active,
+        storage=storage,
+        workspace_graph_id=workspace_id,
+        context_depth=3,
+    )
+    assert result == "continue"
+
+
+def test_goal_tracker_continue_goal_appends_text() -> None:
+    """continue_goal appends the user prompt to the active goal text."""
+    from llmasm.goals.tracker import GoalTracker
+    from llmasm.storage.memory import InMemoryStorage
+
+    storage = InMemoryStorage()
+    tracker = GoalTracker(storage)
+    goal = tracker.create_provisional_goal("workspace_1", "read passage")
+    tracker.finalize_goal(goal.id, "read passage")
+
+    updated = tracker.continue_goal(goal.id, "How many burroughs are there?")
+    assert "read passage" in updated.text
+    assert "How many burroughs are there?" in updated.text
+    assert updated.status == "active"
 
 
 def _make_ctx_item(id: str, text: str) -> ContextItem:

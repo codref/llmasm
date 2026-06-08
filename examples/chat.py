@@ -12,6 +12,7 @@ Try:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,7 @@ from llmasm.schemas import FinalAnswer
 from llmasm.storage.embeddings import InMemoryEmbeddingStore, NullEmbeddingStore, write_memory_item
 from llmasm.storage.memory import InMemoryStorage
 from llmasm.storage.postgres import PostgresEmbeddingStore, PostgresStorage
+from llmasm.tools.reset_embeddings import reset_embeddings
 
 
 STYLE = Style.from_dict(
@@ -63,6 +65,102 @@ def _extract_answer(analysis: RunAnalysis, final_id: str | None) -> FinalAnswer:
     if not artifacts or not artifacts[-1].content_json:
         return FinalAnswer(text="", sources=[])
     return FinalAnswer.model_validate(artifacts[-1].content_json)
+
+
+def _parse_qa(text: str) -> tuple[str, str]:
+    """Parse a MemoryItem text in 'Q: ...\nA: ...' format."""
+    if text.startswith("Q: "):
+        parts = text.split("\n", 1)
+        question = parts[0][3:]
+        if len(parts) > 1 and parts[1].startswith("A: "):
+            answer = parts[1][3:]
+        else:
+            answer = ""
+    else:
+        question = text
+        answer = ""
+    return question, answer
+
+
+def _write_jsonl_record(
+    file_path: str,
+    question: str,
+    answer: str,
+    goal_action: str,
+    status: str,
+    task_graph_id: str,
+    run_id: str,
+    error: str | None,
+    context_length: int | None = None,
+    search_query: str | None = None,
+    rag_enabled: bool = False,
+) -> None:
+    """Append a single conversation turn as JSONL."""
+    record: dict[str, Any] = {
+        "question": question,
+        "answer": answer,
+        "goal_action": goal_action,
+        "status": status,
+        "task_graph_id": task_graph_id,
+        "run_id": run_id,
+        "error": error,
+        "rag_enabled": rag_enabled,
+    }
+    if context_length is not None:
+        record["context_length"] = context_length
+    if search_query:
+        record["search_query"] = search_query
+    with open(file_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _export_workspace_turns(
+    file_path: str,
+    workspace_id: str,
+    storage: InMemoryStorage | PostgresStorage,
+    console: Console,
+) -> None:
+    """Export all kind=turn memory items from workspace to JSONL (overwrite)."""
+    items = storage.list_memory_items(workspace_id)
+    turns = [item for item in items if item.kind == "turn"]
+    turns.sort(key=lambda x: x.created_at)
+
+    records = []
+    for memory in turns:
+        question, answer = _parse_qa(memory.text)
+        goal_action = ""
+        status = "unknown"
+        task_graph_id = ""
+        run_id = memory.source_run_id or ""
+
+        if memory.source_run_id:
+            try:
+                run = storage.load_run(memory.source_run_id)
+                status = run.status
+                task_graph_id = run.task_graph_id
+                if run.task_graph_id:
+                    task_graph = storage.load_task_graph(run.task_graph_id)
+                    goal_action = task_graph.metadata.get("goal_action", "")
+            except Exception:
+                pass  # Graceful degradation if run/task_graph is missing
+
+        records.append(
+            {
+                "question": question,
+                "answer": answer,
+                "goal_action": goal_action,
+                "status": status,
+                "task_graph_id": task_graph_id,
+                "run_id": run_id,
+                "error": None,
+            }
+        )
+
+    with open(file_path, "w", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    console.print(f"[dim]Exported {len(records)} turn(s) to {file_path}[/dim]")
 
 
 def parse_args() -> argparse.Namespace:
@@ -114,6 +212,18 @@ def parse_args() -> argparse.Namespace:
         help="Use the planner model to classify goal actions instead of heuristics",
     )
     parser.add_argument(
+        "--classifier-context-depth",
+        type=int,
+        default=3,
+        help="Number of recent workspace memory items to feed into the goal classifier (0 = disabled)",
+    )
+    parser.add_argument(
+        "--classifier-goal-text-chars",
+        type=int,
+        default=400,
+        help="Max characters of the active goal text shown to the goal classifier",
+    )
+    parser.add_argument(
         "--llm-context-filter",
         action="store_true",
         default=False,
@@ -124,6 +234,50 @@ def parse_args() -> argparse.Namespace:
         default=None,
         metavar="PATH",
         help="Path to a file with one question per line. Runs all turns then exits (no REPL).",
+    )
+    parser.add_argument(
+        "--output-file",
+        default=None,
+        metavar="PATH",
+        help="Path to append JSONL conversation log (auto-logs in --input-file mode and REPL mode).",
+    )
+    parser.add_argument(
+        "--fast-path",
+        action="store_true",
+        default=False,
+        help="Use deterministic conversation fast path (intent -> model -> final) instead of planner",
+    )
+    parser.add_argument(
+        "--chat-embeddings",
+        action="store_true",
+        default=False,
+        help="Enable embeddings for the conversation fast path (required for RAG retrieval)",
+    )
+    parser.add_argument(
+        "--llm-query-rewrite",
+        action="store_true",
+        default=False,
+        help="Rewrite follow-up questions into standalone search queries via LLM (fast-path only)",
+    )
+    parser.add_argument(
+        "--llm-dialogue-classifier",
+        action="store_true",
+        default=False,
+        help="Use the runtime model to classify dialogue type instead of heuristics (fast-path only)",
+    )
+    parser.add_argument(
+        "--qa-truncate-chars",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Truncate assistant answers in Q/A context to N characters (fast-path only)",
+    )
+    parser.add_argument(
+        "--reset-embeddings",
+        action="store_true",
+        default=False,
+        help="Reset pgvector embeddings (drop vector column + clear table) before starting. "
+        "Useful when switching to a different embedding model with a different dimension.",
     )
     return parser.parse_args()
 
@@ -138,7 +292,9 @@ def _build_embedding_store(
     args: argparse.Namespace,
     storage: InMemoryStorage | PostgresStorage,
 ) -> InMemoryEmbeddingStore | PostgresEmbeddingStore | NullEmbeddingStore:
-    if not args.embeddings:
+    # --chat-embeddings implies we need a real embedding store for fast-path RAG
+    needs_embeddings = args.embeddings or args.chat_embeddings
+    if not needs_embeddings:
         return NullEmbeddingStore()
     if args.db_url and isinstance(storage, PostgresStorage):
         return PostgresEmbeddingStore.create(storage.conn, dimensions=args.embedding_dimensions)
@@ -174,7 +330,13 @@ def build_app(args: argparse.Namespace) -> LLMASM:
             embeddings_enabled=args.embeddings,
             reference_workspace_ids=ref_ids,
             llm_goal_classifier=args.llm_goal_classifier,
+            classifier_context_depth=args.classifier_context_depth,
+            classifier_goal_text_chars=args.classifier_goal_text_chars,
             llm_context_filter=args.llm_context_filter,
+            llm_query_rewrite=args.llm_query_rewrite,
+            llm_dialogue_classifier=args.llm_dialogue_classifier,
+            chat_qa_truncate_chars=args.qa_truncate_chars,
+            chat_embeddings_enabled=args.chat_embeddings,
         ),
         schema_registry=default_schema_registry(),
         embedding_store=embedding_store,
@@ -184,6 +346,9 @@ def build_app(args: argparse.Namespace) -> LLMASM:
 def main() -> None:
     args = parse_args()
     console = Console()
+
+    if args.reset_embeddings and args.db_url:
+        reset_embeddings(args.db_url)
 
     if args.fresh and args.db_url:
         import time
@@ -208,11 +373,12 @@ def main() -> None:
     else:
         embedding_label = "[embeddings: off]"
 
+    log_label = f"[logging: on → `{args.output_file}`]" if args.output_file else "[logging: off]"
     console.print(
         Markdown(
             f"**llmasm chat**  |  workspace: `{args.workspace_name}`  "
             f"|  model: `{args.runtime_model}`  |  planner: `{args.planner_model}`  "
-            f"|  storage: `{storage_label}`  |  {embedding_label}\n"
+            f"|  storage: `{storage_label}`  |  {embedding_label}  |  {log_label}\n"
             f"Type /help for commands, /quit or Ctrl-D to exit."
         )
     )
@@ -227,81 +393,137 @@ def main() -> None:
         for turn_idx, question in enumerate(questions):
             console.print(f"[dim][{turn_idx}]>[/dim] {question}")
             console.print()
-            try:
-                task_graph_id = app.compile(workspace_id, question)
-                run_id = app.run(task_graph_id)
-                analysis = app.query_run(run_id)
-            except CompilationError as exc:
-                console.print(f"[red]Planner failed after {exc.attempts} attempt(s).[/red]")
-                if exc.last_errors:
-                    console.print(f"[red]Last errors: {exc.last_errors}[/red]")
-                prev_task_graph_id = None
-                prev_final_node_id = None
-                console.print()
-                continue
-            except LLMASMError as exc:
-                console.print(f"[red]Error: {exc}[/red]")
-                prev_task_graph_id = None
-                prev_final_node_id = None
-                console.print()
-                continue
 
-            final_id = _final_node_id(analysis)
-            answer = _extract_answer(analysis, final_id)
+            status = "succeeded"
+            error: str | None = None
+            task_graph_id: str | None = None
+            run_id: str | None = None
+            analysis: RunAnalysis | None = None
+            answer = FinalAnswer(text="", sources=[])
+            goal_action = ""
 
-            if answer.text:
-                console.print(Markdown(answer.text))
-                if answer.sources:
-                    console.print(f"[dim]sources: {answer.sources}[/dim]")
+            context_length: int | None = None
+            search_query: str | None = None
+            rag_enabled = False
+
+            if args.fast_path:
+                turn_info: dict[str, Any] = {}
+                try:
+                    answer = app.chat(workspace_id, question, out_info=turn_info, turn=turn_idx)
+                    context_length = turn_info.get("instruction_tokens")
+                    run_id = turn_info.get("run_id", "")
+                    search_query = turn_info.get("search_query")
+                    rag_enabled = bool(turn_info.get("rag_enabled", False))
+                except LLMASMError as exc:
+                    status = "failed"
+                    error = str(exc)
+                    console.print(f"[red]Error: {exc}[/red]")
+                if answer.text:
+                    console.print(Markdown(answer.text))
+                else:
+                    console.print("[dim](no output)[/dim]")
+                ctx_label = f"  |  ctx={context_length}tk" if context_length is not None else ""
+                console.print(f"[dim]── turn {turn_idx}  |  [fast path]{ctx_label}[/dim]")
+                console.print()
             else:
-                console.print("[dim](no output)[/dim]")
+                try:
+                    task_graph_id = app.compile(workspace_id, question)
+                    run_id = app.run(task_graph_id)
+                    analysis = app.query_run(run_id)
+                    # Sum token counts of all prompt artifacts in the run
+                    if analysis:
+                        prompt_artifacts = [a for a in analysis.artifacts if a.port == "prompt"]
+                        context_length = sum(a.token_count for a in prompt_artifacts) if prompt_artifacts else None
+                except CompilationError as exc:
+                    status = "failed"
+                    error = f"Planner failed after {exc.attempts} attempt(s): {exc.last_errors}"
+                    console.print(f"[red]Planner failed after {exc.attempts} attempt(s).[/red]")
+                    if exc.last_errors:
+                        console.print(f"[red]Last errors: {exc.last_errors}[/red]")
+                    prev_task_graph_id = None
+                    prev_final_node_id = None
+                    console.print()
+                except LLMASMError as exc:
+                    status = "failed"
+                    error = str(exc)
+                    console.print(f"[red]Error: {exc}[/red]")
+                    prev_task_graph_id = None
+                    prev_final_node_id = None
+                    console.print()
 
-            goal_action = analysis.task_graph.metadata.get("goal_action", "")
-            tg_short = task_graph_id.split("_")[-1][:12]
-            console.print(f"[dim]── turn {turn_idx}  |  goal: {goal_action}  |  tg: {tg_short}[/dim]")
+                if analysis:
+                    final_id = _final_node_id(analysis)
+                    answer = _extract_answer(analysis, final_id)
 
-            memory = write_memory_item(
-                workspace_graph_id=workspace_id,
-                kind="turn",
-                text=f"Q: {question}\nA: {answer.text}",
-                runtime_config=app.runtime_config,
-                provider=app.provider,
-                embedding_store=app.embedding_store,
-                storage=storage,
-                source_run_id=run_id,
-            )
+                    if answer.text:
+                        console.print(Markdown(answer.text))
+                        if answer.sources:
+                            console.print(f"[dim]sources: {answer.sources}[/dim]")
+                    else:
+                        console.print("[dim](no output)[/dim]")
 
-            if prev_task_graph_id is not None:
-                storage.persist_workspace_edge(
-                    WorkspaceEdge(
-                        id=new_id("edge"),
+                    goal_action = analysis.task_graph.metadata.get("goal_action", "")
+                    tg_short = task_graph_id.split("_")[-1][:12]
+                    ctx_label = f"  |  ctx={context_length}tk" if context_length is not None else ""
+                    console.print(f"[dim]── turn {turn_idx}  |  goal: {goal_action}  |  tg: {tg_short}{ctx_label}[/dim]")
+
+                    memory = write_memory_item(
                         workspace_graph_id=workspace_id,
-                        edge_type=WorkspaceEdgeType.FOLLOWS_UP,
-                        from_type="task_graph",
-                        from_id=task_graph_id,
-                        to_type="task_graph",
-                        to_id=prev_task_graph_id,
-                        reason=f"turn {turn_idx} follows turn {turn_idx - 1}",
+                        kind="turn",
+                        text=f"Q: {question}\nA: {answer.text}",
+                        runtime_config=app.runtime_config,
+                        provider=app.provider,
+                        embedding_store=app.embedding_store,
+                        storage=storage,
+                        source_run_id=run_id,
                     )
-                )
 
-            if final_id is not None:
-                storage.persist_workspace_edge(
-                    WorkspaceEdge(
-                        id=new_id("edge"),
-                        workspace_graph_id=workspace_id,
-                        edge_type=WorkspaceEdgeType.PRODUCED,
-                        from_type="node",
-                        from_id=final_id,
-                        to_type="memory_item",
-                        to_id=memory.id,
-                        reason="final node answer stored as workspace memory",
-                    )
-                )
+                    if prev_task_graph_id is not None:
+                        storage.persist_workspace_edge(
+                            WorkspaceEdge(
+                                id=new_id("edge"),
+                                workspace_graph_id=workspace_id,
+                                edge_type=WorkspaceEdgeType.FOLLOWS_UP,
+                                from_type="task_graph",
+                                from_id=task_graph_id,
+                                to_type="task_graph",
+                                to_id=prev_task_graph_id,
+                                reason=f"turn {turn_idx} follows turn {turn_idx - 1}",
+                            )
+                        )
 
-            prev_task_graph_id = task_graph_id
-            prev_final_node_id = final_id
-            console.print()
+                    if final_id is not None:
+                        storage.persist_workspace_edge(
+                            WorkspaceEdge(
+                                id=new_id("edge"),
+                                workspace_graph_id=workspace_id,
+                                edge_type=WorkspaceEdgeType.PRODUCED,
+                                from_type="node",
+                                from_id=final_id,
+                                to_type="memory_item",
+                                to_id=memory.id,
+                                reason="final node answer stored as workspace memory",
+                            )
+                        )
+
+                    prev_task_graph_id = task_graph_id
+                    prev_final_node_id = final_id
+                    console.print()
+
+            if args.output_file:
+                _write_jsonl_record(
+                    file_path=args.output_file,
+                    question=question,
+                    answer=answer.text,
+                    goal_action=goal_action if not args.fast_path else "fast_path",
+                    status=status,
+                    task_graph_id=task_graph_id or "",
+                    run_id=run_id or "",
+                    error=error,
+                    context_length=context_length,
+                    search_query=search_query,
+                    rag_enabled=rag_enabled,
+                )
         return
     # ── Interactive REPL ────────────────────────────────────────────────────
 
@@ -338,6 +560,8 @@ def main() -> None:
                 "  /inspect         — show workspace memory items and edge count\n"
                 "  /graph           — show the task graph from the last turn\n"
                 "  /run             — show node states from the last run\n"
+                "  /export          — export all turns to the default output file (requires --output-file)\n"
+                "  /export <path>   — export all turns to the specified JSONL file\n"
                 "  /inject <text>   — add a context note before the next turn\n"
                 "  anything else is sent to llmasm"
             )
@@ -443,6 +667,19 @@ def main() -> None:
                 )
             continue
 
+        if text.startswith("/export "):
+            path = text[8:].strip()
+            if path:
+                _export_workspace_turns(path, workspace_id, storage, console)
+            continue
+
+        if text == "/export":
+            if not args.output_file:
+                console.print("[red]No default output file set. Use /export <path> or start with --output-file.[/red]")
+                continue
+            _export_workspace_turns(args.output_file, workspace_id, storage, console)
+            continue
+
         if text.startswith("/inject "):
             note = text[8:].strip()
             if note:
@@ -459,82 +696,144 @@ def main() -> None:
             continue
 
         console.print()
-        try:
-            task_graph_id = app.compile(workspace_id, text)
-            run_id = app.run(task_graph_id)
-            analysis = app.query_run(run_id)
-            last_analysis = analysis
-        except CompilationError as exc:
-            console.print(
-                f"[red]Planner failed to compile after {exc.attempts} attempt(s).[/red]"
-            )
-            if exc.last_errors:
-                console.print(f"[red]Last errors: {exc.last_errors}[/red]")
-            continue
-        except LLMASMError as exc:
-            console.print(f"[red]Error: {exc}[/red]")
-            continue
 
-        final_id = _final_node_id(analysis)
-        answer = _extract_answer(analysis, final_id)
+        turn_status = "succeeded"
+        turn_error: str | None = None
+        turn_task_graph_id: str | None = None
+        turn_run_id: str | None = None
+        turn_analysis: RunAnalysis | None = None
+        turn_answer = FinalAnswer(text="", sources=[])
+        turn_goal_action = ""
 
-        if answer.text:
-            console.print(Markdown(answer.text))
-            if answer.sources:
-                console.print(f"[dim]sources: {answer.sources}[/dim]")
+        turn_context_length: int | None = None
+        turn_search_query: str | None = None
+        turn_rag_enabled = False
+
+        if args.fast_path:
+            turn_info: dict[str, Any] = {}
+            try:
+                turn_answer = app.chat(workspace_id, text, out_info=turn_info, turn=turn)
+                turn_context_length = turn_info.get("instruction_tokens")
+                turn_run_id = turn_info.get("run_id", "")
+                turn_search_query = turn_info.get("search_query")
+                turn_rag_enabled = bool(turn_info.get("rag_enabled", False))
+            except LLMASMError as exc:
+                turn_status = "failed"
+                turn_error = str(exc)
+                console.print(f"[red]Error: {exc}[/red]")
+            if turn_answer.text:
+                console.print(Markdown(turn_answer.text))
+                if turn_answer.sources:
+                    console.print(f"[dim]sources: {turn_answer.sources}[/dim]")
+            else:
+                console.print("[dim](no output)[/dim]")
+            ctx_label = f"  |  ctx={turn_context_length}tk" if turn_context_length is not None else ""
+            console.print(f"[dim]── turn {turn}  |  [fast path]{ctx_label}[/dim]")
+            console.print()
         else:
-            console.print("[dim](no output)[/dim]")
-
-        goal_action = analysis.task_graph.metadata.get("goal_action", "")
-        tg_short = task_graph_id.split("_")[-1][:12]
-        console.print(f"[dim]── turn {turn}  |  goal: {goal_action}  |  tg: {tg_short}[/dim]")
-
-        # Persist turn as a MemoryItem so future turns can retrieve it as context.
-        # write_memory_item also embeds the text when embeddings_enabled=True.
-        memory = write_memory_item(
-            workspace_graph_id=workspace_id,
-            kind="turn",
-            text=f"Q: {text}\nA: {answer.text}",
-            runtime_config=app.runtime_config,
-            provider=app.provider,
-            embedding_store=app.embedding_store,
-            storage=storage,
-            source_run_id=run_id,
-        )
-
-        # FOLLOWS_UP: new task graph → previous task graph
-        if previous_task_graph_id is not None:
-            storage.persist_workspace_edge(
-                WorkspaceEdge(
-                    id=new_id("edge"),
-                    workspace_graph_id=workspace_id,
-                    edge_type=WorkspaceEdgeType.FOLLOWS_UP,
-                    from_type="task_graph",
-                    from_id=task_graph_id,
-                    to_type="task_graph",
-                    to_id=previous_task_graph_id,
-                    reason=f"turn {turn} follows turn {turn - 1}",
+            try:
+                turn_task_graph_id = app.compile(workspace_id, text)
+                turn_run_id = app.run(turn_task_graph_id)
+                turn_analysis = app.query_run(turn_run_id)
+                last_analysis = turn_analysis
+                if turn_analysis:
+                    prompt_artifacts = [a for a in turn_analysis.artifacts if a.port == "prompt"]
+                    turn_context_length = sum(a.token_count for a in prompt_artifacts) if prompt_artifacts else None
+            except CompilationError as exc:
+                turn_status = "failed"
+                turn_error = f"Planner failed to compile after {exc.attempts} attempt(s): {exc.last_errors}"
+                console.print(
+                    f"[red]Planner failed to compile after {exc.attempts} attempt(s).[/red]"
                 )
+                if exc.last_errors:
+                    console.print(f"[red]Last errors: {exc.last_errors}[/red]")
+                previous_task_graph_id = None
+                previous_final_node_id = None
+            except LLMASMError as exc:
+                turn_status = "failed"
+                turn_error = str(exc)
+                console.print(f"[red]Error: {exc}[/red]")
+                previous_task_graph_id = None
+                previous_final_node_id = None
+
+            if turn_analysis:
+                final_id = _final_node_id(turn_analysis)
+                turn_answer = _extract_answer(turn_analysis, final_id)
+
+                if turn_answer.text:
+                    console.print(Markdown(turn_answer.text))
+                    if turn_answer.sources:
+                        console.print(f"[dim]sources: {turn_answer.sources}[/dim]")
+                else:
+                    console.print("[dim](no output)[/dim]")
+
+                turn_goal_action = turn_analysis.task_graph.metadata.get("goal_action", "")
+                tg_short = turn_task_graph_id.split("_")[-1][:12]
+                ctx_label = f"  |  ctx={turn_context_length}tk" if turn_context_length is not None else ""
+                console.print(f"[dim]── turn {turn}  |  goal: {turn_goal_action}  |  tg: {tg_short}{ctx_label}[/dim]")
+
+                # Persist turn as a MemoryItem so future turns can retrieve it as context.
+                # write_memory_item also embeds the text when embeddings_enabled=True.
+                memory = write_memory_item(
+                    workspace_graph_id=workspace_id,
+                    kind="turn",
+                    text=f"Q: {text}\nA: {turn_answer.text}",
+                    runtime_config=app.runtime_config,
+                    provider=app.provider,
+                    embedding_store=app.embedding_store,
+                    storage=storage,
+                    source_run_id=turn_run_id,
+                )
+
+                # FOLLOWS_UP: new task graph → previous task graph
+                if previous_task_graph_id is not None:
+                    storage.persist_workspace_edge(
+                        WorkspaceEdge(
+                            id=new_id("edge"),
+                            workspace_graph_id=workspace_id,
+                            edge_type=WorkspaceEdgeType.FOLLOWS_UP,
+                            from_type="task_graph",
+                            from_id=turn_task_graph_id,
+                            to_type="task_graph",
+                            to_id=previous_task_graph_id,
+                            reason=f"turn {turn} follows turn {turn - 1}",
+                        )
+                    )
+
+                # PRODUCED: final node → MemoryItem
+                if final_id is not None:
+                    storage.persist_workspace_edge(
+                        WorkspaceEdge(
+                            id=new_id("edge"),
+                            workspace_graph_id=workspace_id,
+                            edge_type=WorkspaceEdgeType.PRODUCED,
+                            from_type="node",
+                            from_id=final_id,
+                            to_type="memory_item",
+                            to_id=memory.id,
+                            reason="final node answer stored as workspace memory",
+                        )
+                    )
+
+                previous_task_graph_id = turn_task_graph_id
+                previous_final_node_id = final_id
+                console.print()
+
+        if args.output_file:
+            _write_jsonl_record(
+                file_path=args.output_file,
+                question=text,
+                answer=turn_answer.text,
+                goal_action=turn_goal_action if not args.fast_path else "fast_path",
+                status=turn_status,
+                task_graph_id=turn_task_graph_id or "",
+                run_id=turn_run_id or "",
+                error=turn_error,
+                context_length=turn_context_length,
+                search_query=turn_search_query,
+                rag_enabled=turn_rag_enabled,
             )
 
-        # PRODUCED: final node → MemoryItem
-        if final_id is not None:
-            storage.persist_workspace_edge(
-                WorkspaceEdge(
-                    id=new_id("edge"),
-                    workspace_graph_id=workspace_id,
-                    edge_type=WorkspaceEdgeType.PRODUCED,
-                    from_type="node",
-                    from_id=final_id,
-                    to_type="memory_item",
-                    to_id=memory.id,
-                    reason="final node answer stored as workspace memory",
-                )
-            )
-
-        previous_task_graph_id = task_graph_id
-        previous_final_node_id = final_id
-        console.print()
         turn += 1
 
 

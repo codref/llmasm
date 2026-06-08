@@ -142,12 +142,12 @@ class Executor:
             node_id=node.id,
             port=output_port,
             content_json=output.model_dump(mode="json"),
-            token_count=self.runtime_config.tokenizer.count_tokens(json.dumps(output.model_dump())),
+            token_count=self.runtime_config.tokenizer.count_tokens(json.dumps(output.model_dump(mode="json"))),
             metadata={"cache_key": cache_key, "input_artifact_ids": input_artifact_ids},
         )
         self.storage.persist_artifact(artifact)
         if node.kind in {NodeKind.MODEL, NodeKind.COMPRESS}:
-            text = getattr(output, "text", json.dumps(output.model_dump()))
+            text = getattr(output, "text", json.dumps(output.model_dump(mode="json")))
             embed_and_persist(
                 text,
                 "artifact",
@@ -237,7 +237,7 @@ class Executor:
                 return input_value
             if isinstance(input_value, NotFound):
                 return FinalAnswer(text=input_value.detail, sources=[])
-            text = getattr(input_value, "text", json.dumps(input_value.model_dump()))
+            text = getattr(input_value, "text", json.dumps(input_value.model_dump(mode="json")))
             sources = []
             source_id = getattr(input_value, "source_id", None)
             if source_id:
@@ -251,7 +251,7 @@ class Executor:
             state.status = NodeStatus.EXPANDED
             state.metadata["expansion"] = expansion.model_dump()
             self.storage.update_run_node_state(state)
-            return RawText(text=json.dumps(expansion.model_dump(), sort_keys=True))
+            return RawText(text=json.dumps(expansion.model_dump(mode="json"), sort_keys=True))
         if node.kind == NodeKind.ROUTER:
             return self._invoke_router(run, node, direct_inputs)
         if node.kind in {NodeKind.MEMORY_QUERY, NodeKind.GOAL, NodeKind.OBSERVATION}:
@@ -371,10 +371,8 @@ class Executor:
             lines = stripped.splitlines()
             stripped = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
         try:
-            parsed = json.loads(stripped)
-            if isinstance(parsed, dict):
-                return model.model_validate(parsed)
-        except json.JSONDecodeError:
+            return model.model_validate_json(stripped)
+        except (json.JSONDecodeError, Exception):
             pass
         if model is Summary:
             return Summary(text=text)
@@ -417,12 +415,24 @@ class Executor:
         )
         if context_items:
             prior = "\n".join(item.text for item in context_items)
-            instruction = (
-                f"{instruction}\n\n"
-                f"--- Prior conversation ---\n{prior}\n---\n\n"
-                f"Use the prior conversation above to resolve references and understand "
-                f"what the question is about. Answer from your own knowledge."
-            )
+            grounding_mode = node.metadata.get("grounding_mode", "permissive")
+            if grounding_mode == "strict":
+                instruction = (
+                    f"{instruction}\n\n"
+                    f"--- Context ---\n{prior}\n---\n\n"
+                    f"Answer using ONLY the context above. "
+                    f"Base your answer on the information in the context, including what it implies or contradicts. "
+                    f"If the context contains no relevant information at all, say that the provided context does not contain the answer. "
+                    f"Do not use outside knowledge."
+                )
+            else:
+                instruction = (
+                    f"{instruction}\n\n"
+                    f"--- Prior conversation ---\n{prior}\n---\n\n"
+                    f"Use the prior conversation above as the primary source. "
+                    f"If the answer is in the context above, answer from it. "
+                    f"If the context does not contain the answer, you may use your own knowledge."
+                )
         payload: dict[str, Any] = {
             "instruction": instruction,
             "inputs": {name: value.model_dump(mode="json") for name, value in sorted(direct_inputs.items())},
