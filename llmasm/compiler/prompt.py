@@ -56,6 +56,7 @@ def render_planner_prompt(
         "- QA model nodes should set metadata.instruction or metadata.description to the answer instruction.\n"
         "- Final nodes MUST use input_schema Summary and output_schema FinalAnswer; connect the last model node's output to the final node's input.\n"
         "- Use edge ports named output and input unless a node declares explicit ports.\n"
+        "- Port direction must be exactly 'input' or 'output' (not 'in'/'out').\n"
         "- Use a router node when:\n"
         "  (a) a tool might return NotFound and the two paths need different handling, OR\n"
         "  (b) the user explicitly asks to classify input and branch to different answer styles or outputs.\n"

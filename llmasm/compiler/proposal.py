@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -24,7 +24,7 @@ class ProposalPort(BaseModel):
     """Port declaration in a planner proposal."""
 
     name: str
-    direction: str
+    direction: Literal["input", "output"]
     schema_ref: str
     required: bool = True
 

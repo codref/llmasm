@@ -19,6 +19,9 @@ chat = [
   "prompt-toolkit>=3",
   "rich>=13",
 ]
+ami = [
+  "datasets>=2.14",
+]
 dev = [
   "pytest",
   "pytest-cov",

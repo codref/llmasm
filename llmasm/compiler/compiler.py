@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal, cast
 
 from llmasm.compiler.prompt import PriorContext, render_planner_prompt
 from llmasm.compiler.proposal import ProposalEdge, ProposalNode, TaskGraphProposal
@@ -40,6 +40,24 @@ from llmasm.ids import new_id
 from llmasm.providers.base import LLMProvider
 from llmasm.storage.base import Storage
 from llmasm.tools.registry import ToolRegistry
+
+
+_PORT_DIRECTION_SYNONYMS: dict[str, str] = {
+    "in": "input",
+    "input": "input",
+    "out": "output",
+    "output": "output",
+}
+
+
+def _canonical_port_direction(value: str) -> str | None:
+    """Map a planner port-direction value to the canonical 'input'/'output'.
+
+    Returns the canonical direction, or None if the value is not a recognized
+    direction. Common shorthand ('in'/'out') is normalized; genuinely invalid
+    values are surfaced as a validation issue by the caller.
+    """
+    return _PORT_DIRECTION_SYNONYMS.get(value)
 
 
 class Compiler:
@@ -127,7 +145,7 @@ class Compiler:
 
         # Classifier is authoritative; override whatever the planner emitted.
         proposal.goal_action = goal_action
-        task_graph = self._normalize(workspace_graph_id, proposal, prompt, goal.id if goal else None)
+        task_graph, _ = self._normalize(workspace_graph_id, proposal, prompt, goal.id if goal else None)
         self.storage.persist_task_graph(task_graph)
         for edge in self._workspace_edges(task_graph, proposal):
             self.storage.persist_workspace_edge(edge)
@@ -157,7 +175,8 @@ class Compiler:
     ) -> list[ValidationIssue]:
         issues: list[ValidationIssue] = []
         # goal_action is overridden by the classifier after this returns; skip echo check.
-        graph = self._normalize("workspace_validation", proposal, "", None, dry_run=True)
+        graph, normalize_issues = self._normalize("workspace_validation", proposal, "", None, dry_run=True)
+        issues.extend(normalize_issues)
         issues.extend(validate_schema_refs(graph, self.schema_registry))
         issues.extend(validate_edge_compatibility(graph, self.transform_registry))
         issues.extend(validate_tools(graph, self.tool_registry))
@@ -178,10 +197,11 @@ class Compiler:
         goal_id: str | None,
         *,
         dry_run: bool = False,
-    ) -> TaskGraph:
+    ) -> tuple[TaskGraph, list[ValidationIssue]]:
         task_graph_id = "taskgraph_validation" if dry_run else new_id("taskgraph")
         name_to_id: dict[str, str] = {}
         nodes: list[Node] = []
+        issues: list[ValidationIssue] = []
         if not any(node.kind == NodeKind.INTENT for node in proposal.nodes):
             prompt_node = ProposalNode(
                 name="root_prompt",
@@ -220,16 +240,29 @@ class Compiler:
             node_id = f"node_{proposed.name}" if dry_run else new_id("node")
             name_to_id[proposed.name] = node_id
             input_schema, output_schema, execution, metadata = self._canonical_node_fields(proposed)
-            ports = [
-                Port(
-                    node_id=node_id,
-                    name=port.name,
-                    direction=port.direction,  # type: ignore[arg-type]
-                    schema_ref=port.schema_ref,
-                    required=port.required,
+            ports: list[Port] = []
+            for port in proposed.ports:
+                canonical = _canonical_port_direction(port.direction)
+                if canonical is None:
+                    issues.append(
+                        ValidationIssue(
+                            "PORT_DIRECTION_INVALID",
+                            proposed.name,
+                            f"Port {port.name!r} has invalid direction {port.direction!r}; "
+                            "expected 'input' or 'output'",
+                        )
+                    )
+                    continue
+                # canonical is 'input' or 'output' by construction of the synonyms map.
+                ports.append(
+                    Port(
+                        node_id=node_id,
+                        name=port.name,
+                        direction=cast(Literal["input", "output"], canonical),
+                        schema_ref=port.schema_ref,
+                        required=port.required,
+                    )
                 )
-                for port in proposed.ports
-            ]
             if input_schema and not any(port.direction == "input" for port in ports):
                 ports.append(
                     Port(
@@ -285,13 +318,16 @@ class Compiler:
             "goal_id": goal_id,
             "proposal_json": json.dumps(proposal.model_dump(mode="json"), sort_keys=True),
         }
-        return TaskGraph(
-            id=task_graph_id,
-            workspace_graph_id=workspace_graph_id,
-            root_prompt_node_id=nodes[0].id if nodes else None,
-            nodes=nodes,
-            task_edges=edges,
-            metadata=metadata,
+        return (
+            TaskGraph(
+                id=task_graph_id,
+                workspace_graph_id=workspace_graph_id,
+                root_prompt_node_id=nodes[0].id if nodes else None,
+                nodes=nodes,
+                task_edges=edges,
+                metadata=metadata,
+            ),
+            issues,
         )
 
     def _canonical_node_fields(
