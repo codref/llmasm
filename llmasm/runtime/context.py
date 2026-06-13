@@ -10,7 +10,7 @@ from typing import Any
 from pydantic import BaseModel, Field, ValidationError
 
 from llmasm.config import RuntimeConfig
-from llmasm.graph.models import Artifact, MemoryItem, Node, Run
+from llmasm.graph.models import MemoryItem, Node, Run
 from llmasm.providers.base import LLMProvider
 from llmasm.storage.base import ContextItem, Storage
 from llmasm.storage.embeddings import EmbeddingStore, ScoredMatch

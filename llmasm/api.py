@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from llmasm.analysis.run import RunAnalysis, query_run
 from llmasm.compiler.compiler import Compiler
 from llmasm.config import RuntimeConfig

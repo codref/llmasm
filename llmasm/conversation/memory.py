@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
 
 from llmasm.config import RuntimeConfig
 from llmasm.graph.models import MemoryItem
 from llmasm.providers.base import LLMProvider
 from llmasm.storage.base import Storage
+from llmasm.chunking import Chunk
 from llmasm.storage.embeddings import EmbeddingStore, write_memory_item
 
 
@@ -40,6 +40,81 @@ def store_source_passage(
         source_run_id=source_run_id,
         confidence=1.0,
         metadata={"turn": turn, "is_authoritative_source": True},
+    )
+    _attach_if_possible(item, embedding_store)
+    return item
+
+
+def store_source_passages(
+    workspace_graph_id: str,
+    chunks: list[Chunk],
+    *,
+    storage: Storage,
+    runtime_config: RuntimeConfig,
+    provider: LLMProvider,
+    embedding_store: EmbeddingStore,
+    source_run_id: str | None = None,
+    turn: int | None = None,
+) -> list[MemoryItem]:
+    """Store multiple source-passage chunks produced by a chunker.
+
+    Each chunk becomes its own ``source_passage`` memory item so that
+    retrieval can surface only the relevant chunks instead of the whole
+    document.
+    """
+
+    items: list[MemoryItem] = []
+    for chunk in chunks:
+        metadata = dict(chunk.metadata)
+        metadata.setdefault("turn", turn)
+        metadata.setdefault("is_authoritative_source", True)
+        item = write_memory_item(
+            workspace_graph_id=workspace_graph_id,
+            kind="source_passage",
+            text=chunk.text,
+            runtime_config=runtime_config,
+            provider=provider,
+            embedding_store=embedding_store,
+            storage=storage,
+            source_run_id=source_run_id,
+            confidence=1.0,
+            metadata=metadata,
+        )
+        _attach_if_possible(item, embedding_store)
+        items.append(item)
+    return items
+
+
+def store_source_summary(
+    workspace_graph_id: str,
+    summary_text: str,
+    *,
+    source_id: str,
+    storage: Storage,
+    runtime_config: RuntimeConfig,
+    provider: LLMProvider,
+    embedding_store: EmbeddingStore,
+    source_run_id: str | None = None,
+    turn: int | None = None,
+) -> MemoryItem:
+    """Store a document-level summary linked to a chunked source."""
+
+    item = write_memory_item(
+        workspace_graph_id=workspace_graph_id,
+        kind="source_passage",
+        text=summary_text,
+        runtime_config=runtime_config,
+        provider=provider,
+        embedding_store=embedding_store,
+        storage=storage,
+        source_run_id=source_run_id,
+        confidence=1.0,
+        metadata={
+            "turn": turn,
+            "source_id": source_id,
+            "is_summary": True,
+            "is_authoritative_source": True,
+        },
     )
     _attach_if_possible(item, embedding_store)
     return item

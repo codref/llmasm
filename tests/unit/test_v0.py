@@ -8,8 +8,8 @@ from llmasm.api import LLMASM
 from llmasm.analysis.visualize import to_dot, to_mermaid, to_viewer_graph
 from llmasm.compiler.parser import parse_task_graph_proposal
 from llmasm.config import RuntimeConfig
-from llmasm.goals.classifier import classify_goal_action, classify_goal_action_llm, GoalClassification
-from llmasm.runtime.context import ContextRelevanceFilter, filter_context_with_llm
+from llmasm.goals.classifier import classify_goal_action, classify_goal_action_llm
+from llmasm.runtime.context import filter_context_with_llm
 from llmasm.storage.base import ContextItem
 from llmasm.graph.models import Goal, MemoryItem, Node, NodeKind, Run, RunStatus, TaskGraph, WorkspaceGraph
 from llmasm.graph.registry import default_schema_registry
@@ -573,7 +573,6 @@ def test_select_context_vector_path_returns_memory_items() -> None:
 def _build_router_graph(workspace_id: str, storage: InMemoryStorage, *, not_found_input: bool = False) -> Run:
     """Build intent → router → {found: model → final_ok} / {missing: final_missing} graph."""
     from llmasm.graph.models import TaskEdge, TaskGraph
-    from llmasm.schemas import NotFound, RawText
 
     tg_id = new_id("taskgraph")
 

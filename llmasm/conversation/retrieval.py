@@ -6,7 +6,7 @@ scoped retrieval within a single workspace.
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Protocol
 
 from llmasm.config import RuntimeConfig
 from llmasm.graph.models import MemoryItem
@@ -145,6 +145,11 @@ def _default_preparer(runtime_config: RuntimeConfig) -> QueryPreparer:
     return PassthroughPreparer()
 
 
+def _is_summary_item(item: MemoryItem) -> bool:
+    """Return True when a source_passage item is a document summary."""
+    return bool(item.metadata.get("is_summary", False))
+
+
 def retrieve_context(
     workspace_graph_id: str,
     prompt: str,
@@ -154,11 +159,12 @@ def retrieve_context(
     runtime_config: RuntimeConfig,
     embedding_store: EmbeddingStore | None = None,
     preparer: QueryPreparer | None = None,
-) -> tuple[list[str], list[tuple[str, str]], str]:
+) -> tuple[str | None, list[str], list[tuple[str, str]], str]:
     """Retrieve relevant passages and Q/A pairs for a prompt via embedding search.
 
     Returns a tuple of:
-      - retrieved_passages: source passage texts ranked by relevance
+      - summary: document-level summary text, if one is stored
+      - retrieved_passages: source chunk texts ranked by relevance
       - retrieved_qa_pairs: (question, answer) tuples ranked by relevance
       - search_query: the (possibly rewritten) query that was embedded
     """
@@ -191,8 +197,9 @@ def retrieve_context(
         limit=20,
     )
 
-    # 3. Separate passages from conversation items
-    passage_matches: list[tuple[MemoryItem, float]] = []
+    # 3. Separate summaries, chunks, and conversation items
+    summary_matches: list[tuple[MemoryItem, float]] = []
+    chunk_matches: list[tuple[MemoryItem, float]] = []
     qa_matches: list[tuple[MemoryItem, float]] = []
     for match in matches:
         item = match.item
@@ -201,20 +208,29 @@ def retrieve_context(
         if item.workspace_graph_id != workspace_graph_id:
             continue
         if item.kind == "source_passage":
-            passage_matches.append((item, match.score))
+            if _is_summary_item(item):
+                summary_matches.append((item, match.score))
+            else:
+                chunk_matches.append((item, match.score))
         elif item.kind in {"user_question", "assistant_answer"}:
             qa_matches.append((item, match.score))
 
-    # 4. Build passage list (deduplicated, sorted by score)
+    # 4. Pick the highest-scoring summary (if any)
+    summary: str | None = None
+    if summary_matches:
+        summary_matches.sort(key=lambda x: x[1], reverse=True)
+        summary = summary_matches[0][0].text
+
+    # 5. Build chunk passage list (deduplicated, sorted by score)
     seen_passages: set[str] = set()
     passages: list[str] = []
-    passage_matches.sort(key=lambda x: x[1], reverse=True)
-    for item, _score in passage_matches:
+    chunk_matches.sort(key=lambda x: x[1], reverse=True)
+    for item, _score in chunk_matches:
         if item.text not in seen_passages:
             passages.append(item.text)
             seen_passages.add(item.text)
 
-    # 5. Build Q/A pair list (deduplicated, sorted by score)
+    # 6. Build Q/A pair list (deduplicated, sorted by score)
     qa_pairs: list[tuple[str, str]] = []
     used_qa: set[str] = set()
     qa_matches.sort(key=lambda x: x[1], reverse=True)
@@ -240,7 +256,7 @@ def retrieve_context(
         if len(qa_pairs) >= 3:
             break
 
-    return passages, qa_pairs, search_query
+    return summary, passages, qa_pairs, search_query
 
 
 def compose_instruction(
@@ -248,8 +264,9 @@ def compose_instruction(
     dialogue_type: str,
     source_passages: list[str],
     qa_pairs: list[tuple[str, str]],
+    summary: str | None = None,
 ) -> str:
-    """Build the model prompt from retrieved passages and Q/A pairs."""
+    """Build the model prompt from an optional summary, retrieved passages and Q/A pairs."""
     parts: list[str] = []
 
     if source_passages:
@@ -259,6 +276,12 @@ def compose_instruction(
             "If the passages contain no relevant information at all, say that the provided passage does not contain the answer. "
             "Do not use outside knowledge."
         )
+
+        if summary:
+            parts.append("\n--- Source summary ---")
+            parts.append(summary)
+            parts.append("---")
+
         parts.append("\n--- Source passages ---")
         for i, passage in enumerate(source_passages, 1):
             parts.append(f"Passage {i}:\n{passage}")

@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import sys
 import uuid
 from pathlib import Path
 from typing import Any
@@ -32,7 +31,6 @@ from pydantic_ai.providers.ollama import OllamaProvider
 try:
     from prompt_toolkit import PromptSession
     from prompt_toolkit.history import InMemoryHistory
-    from prompt_toolkit.styles import Style
     _HAS_PROMPT_TOOLKIT = True
 except Exception:
     _HAS_PROMPT_TOOLKIT = False

@@ -44,7 +44,9 @@ Prompt → Compiler → TaskGraph → Runtime VM → FinalAnswer
 - **`llmasm/providers/base.py`** — `LLMProvider` base protocol (`generate`, `embed`, `list_models`).
 - **`llmasm/providers/ollama.py`** — `OllamaProvider`, default URL `http://localhost:11434`.
 - **`llmasm/tools/registry.py`** — `ToolRegistry`; tools must be registered before use. Tool specs reference schema names from the `SchemaRegistry`.
-- **`llmasm/config.py`** — `RuntimeConfig` dataclass shared by compiler and runtime.
+- **`llmasm/config.py`** — `RuntimeConfig` dataclass shared by compiler and runtime. Includes chunking/summary knobs for long source passages in fast-path chat.
+- **`llmasm/chunking.py`** — `TextChunker` base class and `SentenceTextChunker`; used by the fast path to split long `source_passage` items into retrievable chunks.
+- **`llmasm/tokenizers.py`** — `Tokenizer` abstract base class; concrete tokenizers can be plugged into `RuntimeConfig.tokenizer` and the chunker.
 
 ## Key rules for making changes
 
@@ -53,6 +55,7 @@ Prompt → Compiler → TaskGraph → Runtime VM → FinalAnswer
 - **Schema names are strings** resolved through `SchemaRegistry` → Pydantic model classes. Built-in schemas live in `llmasm/schemas.py`.
 - **Node canonicalization happens in `compiler.py:_canonical_node_fields`.** The planner model may put schema names in `metadata` instead of top-level fields; the compiler normalizes both.
 - **Embedding dimensions are locked per workspace.** Changing `embedding_dimensions` after a workspace has been created raises `StorageError`. Drop the vector column and re-initialize to switch models.
+- **Long source passages are automatically chunked in fast-path chat.** When `chunking_enabled=True` and a `source_passage` exceeds `chunking_trigger_tokens`, the text is split into `source_passage` chunks and a summary node is run to produce a workspace-level summary. Chunks and summaries are both stored as `MemoryItem` objects with `metadata.is_summary` to distinguish them.
 
 ## Testing conventions
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 from llmasm.api import LLMASM
 from llmasm.config import RuntimeConfig
@@ -16,7 +15,6 @@ from llmasm.conversation.memory import (
 from llmasm.graph.models import NodeKind
 from llmasm.graph.registry import default_schema_registry
 from llmasm.graph.transforms import default_transform_registry
-from llmasm.schemas import FinalAnswer
 from llmasm.storage.embeddings import NullEmbeddingStore
 from llmasm.storage.memory import InMemoryStorage
 from llmasm.tools.registry import ToolRegistry
@@ -205,3 +203,99 @@ class TestConversationFastPath:
         # Verify planner WAS called (format_schema is not None)
         planner_calls = [p for p in provider.generate_prompts if "TaskGraphProposal" in p]
         assert len(planner_calls) > 0
+
+
+def _chunking_model_text(prompt: str) -> str:
+    try:
+        parsed = json.loads(prompt)
+        instruction = parsed.get("instruction", "")
+    except (json.JSONDecodeError, AttributeError):
+        instruction = prompt
+
+    if "summarize" in instruction.lower() and "source text" in instruction.lower():
+        return json.dumps({"text": "A concise summary of the source."})
+
+    question = ""
+    for line in instruction.splitlines():
+        if line.startswith("Current question:"):
+            question = line.split(":", 1)[1].strip().lower()
+            break
+    if "how many" in question:
+        return json.dumps({"text": "Five.", "sources": []})
+    return json.dumps({"text": "generic answer", "sources": []})
+
+
+def _make_chunking_app(
+    *,
+    chunking_enabled: bool = True,
+    trigger_tokens: int = 10,
+) -> tuple[LLMASM, InMemoryStorage, FakeProvider]:
+    storage = InMemoryStorage()
+    provider = FakeProvider(model_text=_chunking_model_text)
+    schemas = default_schema_registry()
+    tools = ToolRegistry(schemas)
+    app = LLMASM(
+        storage=storage,
+        provider=provider,
+        tool_registry=tools,
+        schema_registry=schemas,
+        transform_registry=default_transform_registry(),
+        runtime_config=RuntimeConfig(
+            default_model="fake-model",
+            embeddings_enabled=False,
+            chunking_enabled=chunking_enabled,
+            chunking_trigger_tokens=trigger_tokens,
+            chunk_target_tokens=8,
+            chunk_overlap_tokens=2,
+            chunking_summary_enabled=True,
+        ),
+        embedding_store=NullEmbeddingStore(),
+    )
+    return app, storage, provider
+
+
+class TestChunkingFastPath:
+    def test_long_source_passage_is_chunked_and_summarized(self) -> None:
+        app, storage, _provider = _make_chunking_app()
+        workspace_id = app.create_workspace("test")
+        passage = "One. Two. Three. Four. Five. Six. Seven. Eight. Nine. Ten. Eleven. Twelve."
+        answer = app.chat(workspace_id, passage)
+        assert "got it" in answer.text.lower() or "saved" in answer.text.lower()
+
+        items = get_source_passages(storage, workspace_id)
+        chunks = [item for item in items if not item.metadata.get("is_summary")]
+        summaries = [item for item in items if item.metadata.get("is_summary")]
+
+        assert len(chunks) > 1
+        assert all(item.kind == "source_passage" for item in chunks)
+        assert all(item.metadata.get("source_id") for item in chunks)
+        assert len(summaries) == 1
+        assert summaries[0].text == "A concise summary of the source."
+        assert summaries[0].metadata.get("source_id")
+
+    def test_chunking_disabled_stores_single_passage(self) -> None:
+        app, storage, _provider = _make_chunking_app(chunking_enabled=False, trigger_tokens=5)
+        workspace_id = app.create_workspace("test")
+        passage = "This is a long enough source passage to exceed the trigger. " * 3
+        answer = app.chat(workspace_id, passage)
+        assert "got it" in answer.text.lower() or "saved" in answer.text.lower()
+
+        sources = get_source_passages(storage, workspace_id)
+        assert len(sources) == 1
+        assert not sources[0].metadata.get("is_summary")
+
+    def test_summary_node_graph_shape(self) -> None:
+        app, storage, _provider = _make_chunking_app()
+        workspace_id = app.create_workspace("test")
+        app.chat(workspace_id, "One. Two. Three. Four. Five. Six. Seven. Eight. Nine. Ten. Eleven. Twelve.")
+
+        summary_graphs = [
+            g for g in storage.task_graphs.values()
+            if g.metadata.get("summary_graph")
+        ]
+        assert len(summary_graphs) == 1
+        kinds = {node.kind for node in summary_graphs[0].nodes}
+        assert kinds == {NodeKind.INTENT, NodeKind.MODEL, NodeKind.FINAL}
+        summary_nodes = [n for n in summary_graphs[0].nodes if n.name == "summary"]
+        assert len(summary_nodes) == 1
+        assert summary_nodes[0].output_schema == "Summary"

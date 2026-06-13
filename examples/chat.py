@@ -254,6 +254,39 @@ def parse_args() -> argparse.Namespace:
         help="Enable embeddings for the conversation fast path (required for RAG retrieval)",
     )
     parser.add_argument(
+        "--chunking",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Automatically chunk long source passages in fast-path mode (default: on)",
+    )
+    parser.add_argument(
+        "--chunking-trigger-tokens",
+        type=int,
+        default=512,
+        metavar="N",
+        help="Token threshold above which a source passage is chunked (default: 512)",
+    )
+    parser.add_argument(
+        "--chunk-target-tokens",
+        type=int,
+        default=256,
+        metavar="N",
+        help="Target token size for each chunk (default: 256)",
+    )
+    parser.add_argument(
+        "--chunk-overlap-tokens",
+        type=int,
+        default=32,
+        metavar="N",
+        help="Overlap tokens between consecutive chunks (default: 32)",
+    )
+    parser.add_argument(
+        "--chunking-summary",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Generate a summary node when chunking a source passage (default: on)",
+    )
+    parser.add_argument(
         "--llm-query-rewrite",
         action="store_true",
         default=False,
@@ -337,6 +370,11 @@ def build_app(args: argparse.Namespace) -> LLMASM:
             llm_dialogue_classifier=args.llm_dialogue_classifier,
             chat_qa_truncate_chars=args.qa_truncate_chars,
             chat_embeddings_enabled=args.chat_embeddings,
+            chunking_enabled=args.chunking,
+            chunking_trigger_tokens=args.chunking_trigger_tokens,
+            chunk_target_tokens=args.chunk_target_tokens,
+            chunk_overlap_tokens=args.chunk_overlap_tokens,
+            chunking_summary_enabled=args.chunking_summary,
         ),
         schema_registry=default_schema_registry(),
         embedding_store=embedding_store,
@@ -389,7 +427,7 @@ def main() -> None:
         questions = Path(args.input_file).read_text().splitlines()
         questions = [q.strip() for q in questions if q.strip()]
         prev_task_graph_id: str | None = None
-        prev_final_node_id: str | None = None
+
         for turn_idx, question in enumerate(questions):
             console.print(f"[dim][{turn_idx}]>[/dim] {question}")
             console.print()
@@ -441,14 +479,12 @@ def main() -> None:
                     if exc.last_errors:
                         console.print(f"[red]Last errors: {exc.last_errors}[/red]")
                     prev_task_graph_id = None
-                    prev_final_node_id = None
                     console.print()
                 except LLMASMError as exc:
                     status = "failed"
                     error = str(exc)
                     console.print(f"[red]Error: {exc}[/red]")
                     prev_task_graph_id = None
-                    prev_final_node_id = None
                     console.print()
 
                 if analysis:
@@ -507,7 +543,6 @@ def main() -> None:
                         )
 
                     prev_task_graph_id = task_graph_id
-                    prev_final_node_id = final_id
                     console.print()
 
             if args.output_file:
@@ -529,7 +564,6 @@ def main() -> None:
 
     session: PromptSession[str] = PromptSession(history=InMemoryHistory())
     previous_task_graph_id: str | None = None
-    previous_final_node_id: str | None = None
     last_analysis: RunAnalysis | None = None
     turn = 0
 
@@ -572,7 +606,6 @@ def main() -> None:
             if active_goal:
                 goal_tracker.close_goal(active_goal.id, reason="user cleared conversation")
             previous_task_graph_id = None
-            previous_final_node_id = None
             console.print("[dim]Conversation cleared. Active goal closed.[/dim]")
             continue
 
@@ -748,13 +781,11 @@ def main() -> None:
                 if exc.last_errors:
                     console.print(f"[red]Last errors: {exc.last_errors}[/red]")
                 previous_task_graph_id = None
-                previous_final_node_id = None
             except LLMASMError as exc:
                 turn_status = "failed"
                 turn_error = str(exc)
                 console.print(f"[red]Error: {exc}[/red]")
                 previous_task_graph_id = None
-                previous_final_node_id = None
 
             if turn_analysis:
                 final_id = _final_node_id(turn_analysis)
@@ -816,8 +847,8 @@ def main() -> None:
                     )
 
                 previous_task_graph_id = turn_task_graph_id
-                previous_final_node_id = final_id
                 console.print()
+
 
         if args.output_file:
             _write_jsonl_record(

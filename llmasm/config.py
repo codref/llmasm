@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from llmasm.providers.base import SimpleTokenizer, TokenizerProtocol
+from llmasm.providers.base import SimpleTokenizer
+from llmasm.tokenizers import Tokenizer
 
 
 @dataclass
@@ -15,7 +16,7 @@ class RuntimeConfig:
     planner_max_tokens: int = 6144
     compiler_max_attempts: int = 5
     repair_section_reserve: int = 300
-    tokenizer: TokenizerProtocol = field(default_factory=SimpleTokenizer)
+    tokenizer: Tokenizer = field(default_factory=SimpleTokenizer)
     scope: str = "local"
     default_model: str = "llama3.1:8b"
     default_context_tokens: int = 4096
@@ -34,3 +35,10 @@ class RuntimeConfig:
     chat_qa_truncate_chars: int | None = None
     llm_query_rewrite: bool = False
     llm_dialogue_classifier: bool = False
+
+    # Document chunking for long source passages
+    chunking_enabled: bool = True
+    chunking_trigger_tokens: int = 512
+    chunk_target_tokens: int = 256
+    chunk_overlap_tokens: int = 32
+    chunking_summary_enabled: bool = True

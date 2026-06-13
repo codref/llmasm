@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from math import ceil
 from typing import Any, Protocol
 
+from llmasm.tokenizers import Tokenizer
+
 
 @dataclass(frozen=True)
 class ModelInfo:
@@ -39,7 +41,7 @@ class TokenizerProtocol(Protocol):
         """Return an estimated token count."""
 
 
-class SimpleTokenizer:
+class SimpleTokenizer(Tokenizer):
     """Default token estimator based on word count."""
 
     def count_tokens(self, text: str) -> int:

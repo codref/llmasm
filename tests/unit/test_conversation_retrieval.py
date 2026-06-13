@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from llmasm.config import RuntimeConfig
 from llmasm.conversation.retrieval import (
     LLMRewritePreparer,
@@ -10,12 +12,21 @@ from llmasm.conversation.retrieval import (
     retrieve_context,
 )
 from llmasm.graph.registry import default_schema_registry
-from llmasm.graph.transforms import default_transform_registry
-from llmasm.schemas import FinalAnswer
+from llmasm.chunking import Chunk
 from llmasm.storage.embeddings import InMemoryEmbeddingStore, NullEmbeddingStore
 from llmasm.storage.memory import InMemoryStorage
 from llmasm.tools.registry import ToolRegistry
 from tests.unit.fakes import FakeProvider
+
+
+class FixedEmbeddingProvider(FakeProvider):
+    """Fake provider that returns a fixed embedding vector for every text."""
+
+    def embed(self, texts: list[str], options: dict[str, Any] | None = None) -> list[Any]:
+        from llmasm.providers.base import EmbeddingOutput
+
+        self.embed_calls += len(texts)
+        return [EmbeddingOutput(vector=[1.0, 0.0]) for _ in texts]
 
 
 def test_passthrough_preparer() -> None:
@@ -81,7 +92,7 @@ def test_retrieve_context_with_embeddings() -> None:
     provider = FakeProvider()
     embedding_store = InMemoryEmbeddingStore()
     schemas = default_schema_registry()
-    tools = ToolRegistry(schemas)
+    _tools = ToolRegistry(schemas)
     runtime_config = RuntimeConfig(
         default_model="fake-model",
         embeddings_enabled=True,
@@ -134,7 +145,7 @@ def test_retrieve_context_with_embeddings() -> None:
     )
     embedding_store.attach_item("memory_item", a1.id, a1)
 
-    passages, qa_pairs, search_query = retrieve_context(
+    summary, passages, qa_pairs, search_query = retrieve_context(
         workspace_id,
         "How long?",
         storage=storage,
@@ -151,6 +162,7 @@ def test_retrieve_context_with_embeddings() -> None:
     # but the structure should be correct
     assert isinstance(qa_pairs, list)
     assert isinstance(search_query, str)
+    assert summary is None
 
 
 def test_retrieve_context_fallback_when_no_embeddings() -> None:
@@ -159,7 +171,7 @@ def test_retrieve_context_fallback_when_no_embeddings() -> None:
     storage = InMemoryStorage()
     provider = FakeProvider()
     schemas = default_schema_registry()
-    tools = ToolRegistry(schemas)
+    _tools = ToolRegistry(schemas)
     runtime_config = RuntimeConfig(
         default_model="fake-model",
         embeddings_enabled=False,
@@ -170,7 +182,7 @@ def test_retrieve_context_fallback_when_no_embeddings() -> None:
     workspace_id = "workspace_test2"
     storage.create_workspace_graph(WorkspaceGraph(id=workspace_id, name="test"))
 
-    passages, qa_pairs, search_query = retrieve_context(
+    summary, passages, qa_pairs, search_query = retrieve_context(
         workspace_id,
         "How long?",
         storage=storage,
@@ -182,3 +194,66 @@ def test_retrieve_context_fallback_when_no_embeddings() -> None:
     assert passages == []
     assert qa_pairs == []
     assert search_query == "How long?"
+    assert summary is None
+
+
+def test_retrieve_context_returns_summary_and_chunks() -> None:
+    """Stored summaries are surfaced separately from chunks."""
+    from llmasm.conversation.memory import store_source_passages, store_source_summary
+    from llmasm.graph.models import WorkspaceGraph
+
+    storage = InMemoryStorage()
+    provider = FixedEmbeddingProvider()
+    embedding_store = InMemoryEmbeddingStore()
+    runtime_config = RuntimeConfig(
+        default_model="fake-model",
+        embeddings_enabled=True,
+        chat_embeddings_enabled=True,
+        embedding_model="nomic-embed-text",
+    )
+
+    workspace_id = "workspace_test_summary"
+    storage.create_workspace_graph(WorkspaceGraph(id=workspace_id, name="test"))
+
+    chunks = [
+        Chunk(text="Dennis Farina was on Law & Order.", token_count=8),
+        Chunk(text="He played Detective Joe Fontana.", token_count=7),
+    ]
+    source_id = "source_abc"
+    stored_chunks = store_source_passages(
+        workspace_id,
+        chunks,
+        storage=storage,
+        runtime_config=runtime_config,
+        provider=provider,
+        embedding_store=embedding_store,
+    )
+    for item in stored_chunks:
+        embedding_store.attach_item("memory_item", item.id, item)
+
+    summary_item = store_source_summary(
+        workspace_id,
+        "Dennis Farina played Detective Joe Fontana on Law & Order.",
+        source_id=source_id,
+        storage=storage,
+        runtime_config=runtime_config,
+        provider=provider,
+        embedding_store=embedding_store,
+    )
+    embedding_store.attach_item("memory_item", summary_item.id, summary_item)
+
+    summary, passages, qa_pairs, search_query = retrieve_context(
+        workspace_id,
+        "Who did Dennis Farina play?",
+        storage=storage,
+        provider=provider,
+        runtime_config=runtime_config,
+        embedding_store=embedding_store,
+    )
+
+    assert summary is not None
+    assert "Dennis Farina" in summary
+    assert len(passages) >= 1
+    assert any("Fontana" in passage for passage in passages)
+    assert isinstance(qa_pairs, list)
+    assert isinstance(search_query, str)

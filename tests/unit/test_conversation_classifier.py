@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 from llmasm.conversation.classifier import (
-    DialogueClassification,
     DialogueType,
     classify_dialogue,
     classify_dialogue_llm,
