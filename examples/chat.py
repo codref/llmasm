@@ -28,6 +28,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from llmasm.api import LLMASM
 from llmasm.analysis.run import RunAnalysis
 from llmasm.config import RuntimeConfig
+from llmasm.conversation.memory import (
+    store_assistant_answer,
+    store_user_question,
+)
 from llmasm.errors import CompilationError, LLMASMError
 from llmasm.goals.tracker import GoalTracker
 from llmasm.graph.models import MemoryItem, WorkspaceEdge, WorkspaceEdgeType, WorkspaceGraph
@@ -35,7 +39,7 @@ from llmasm.graph.registry import default_schema_registry
 from llmasm.ids import new_id
 from llmasm.providers.ollama import OllamaProvider
 from llmasm.schemas import FinalAnswer
-from llmasm.storage.embeddings import InMemoryEmbeddingStore, NullEmbeddingStore, write_memory_item
+from llmasm.storage.embeddings import InMemoryEmbeddingStore, NullEmbeddingStore
 from llmasm.storage.memory import InMemoryStorage
 from llmasm.storage.postgres import PostgresEmbeddingStore, PostgresStorage
 from llmasm.tools.reset_embeddings import reset_embeddings
@@ -65,21 +69,6 @@ def _extract_answer(analysis: RunAnalysis, final_id: str | None) -> FinalAnswer:
     if not artifacts or not artifacts[-1].content_json:
         return FinalAnswer(text="", sources=[])
     return FinalAnswer.model_validate(artifacts[-1].content_json)
-
-
-def _parse_qa(text: str) -> tuple[str, str]:
-    """Parse a MemoryItem text in 'Q: ...\nA: ...' format."""
-    if text.startswith("Q: "):
-        parts = text.split("\n", 1)
-        question = parts[0][3:]
-        if len(parts) > 1 and parts[1].startswith("A: "):
-            answer = parts[1][3:]
-        else:
-            answer = ""
-    else:
-        question = text
-        answer = ""
-    return question, answer
 
 
 def _write_jsonl_record(
@@ -120,22 +109,37 @@ def _export_workspace_turns(
     storage: InMemoryStorage | PostgresStorage,
     console: Console,
 ) -> None:
-    """Export all kind=turn memory items from workspace to JSONL (overwrite)."""
+    """Export conversation turns from user_question/assistant_answer memory items."""
     items = storage.list_memory_items(workspace_id)
-    turns = [item for item in items if item.kind == "turn"]
-    turns.sort(key=lambda x: x.created_at)
+    questions = sorted(
+        [item for item in items if item.kind == "user_question"],
+        key=lambda x: x.created_at,
+    )
+    answers = sorted(
+        [item for item in items if item.kind == "assistant_answer"],
+        key=lambda x: x.created_at,
+    )
 
     records = []
-    for memory in turns:
-        question, answer = _parse_qa(memory.text)
+    used_answers: set[str] = set()
+    for question in questions:
+        answer = next(
+            (
+                a
+                for a in answers
+                if a.id not in used_answers and a.created_at >= question.created_at
+            ),
+            None,
+        )
+        answer_text = answer.text if answer else ""
+        run_id = (answer.source_run_id if answer else question.source_run_id) or ""
         goal_action = ""
         status = "unknown"
         task_graph_id = ""
-        run_id = memory.source_run_id or ""
 
-        if memory.source_run_id:
+        if run_id:
             try:
-                run = storage.load_run(memory.source_run_id)
+                run = storage.load_run(run_id)
                 status = run.status
                 task_graph_id = run.task_graph_id
                 if run.task_graph_id:
@@ -146,8 +150,8 @@ def _export_workspace_turns(
 
         records.append(
             {
-                "question": question,
-                "answer": answer,
+                "question": question.text,
+                "answer": answer_text,
                 "goal_action": goal_action,
                 "status": status,
                 "task_graph_id": task_graph_id,
@@ -155,6 +159,8 @@ def _export_workspace_turns(
                 "error": None,
             }
         )
+        if answer:
+            used_answers.add(answer.id)
 
     with open(file_path, "w", encoding="utf-8") as f:
         for record in records:
@@ -464,14 +470,17 @@ def main() -> None:
                 console.print(f"[dim]── turn {turn_idx}  |  [fast path]{ctx_label}[/dim]")
                 console.print()
             else:
+                ask_info: dict[str, Any] = {}
                 try:
-                    task_graph_id = app.compile(workspace_id, question)
-                    run_id = app.run(task_graph_id)
-                    analysis = app.query_run(run_id)
-                    # Sum token counts of all prompt artifacts in the run
-                    if analysis:
-                        prompt_artifacts = [a for a in analysis.artifacts if a.port == "prompt"]
-                        context_length = sum(a.token_count for a in prompt_artifacts) if prompt_artifacts else None
+                    answer = app.ask(workspace_id, question, out_info=ask_info)
+                    run_id = ask_info.get("run_id", "")
+                    task_graph_id = ask_info.get("task_graph_id") or ""
+                    if run_id:
+                        analysis = app.query_run(run_id)
+                        if analysis:
+                            prompt_artifacts = [a for a in analysis.artifacts if a.port == "prompt"]
+                            context_length = sum(a.token_count for a in prompt_artifacts) if prompt_artifacts else None
+                            goal_action = analysis.task_graph.metadata.get("goal_action", "")
                 except CompilationError as exc:
                     status = "failed"
                     error = f"Planner failed after {exc.attempts} attempt(s): {exc.last_errors}"
@@ -489,7 +498,6 @@ def main() -> None:
 
                 if analysis:
                     final_id = _final_node_id(analysis)
-                    answer = _extract_answer(analysis, final_id)
 
                     if answer.text:
                         console.print(Markdown(answer.text))
@@ -498,20 +506,34 @@ def main() -> None:
                     else:
                         console.print("[dim](no output)[/dim]")
 
-                    goal_action = analysis.task_graph.metadata.get("goal_action", "")
                     tg_short = task_graph_id.split("_")[-1][:12]
                     ctx_label = f"  |  ctx={context_length}tk" if context_length is not None else ""
                     console.print(f"[dim]── turn {turn_idx}  |  goal: {goal_action}  |  tg: {tg_short}{ctx_label}[/dim]")
 
-                    memory = write_memory_item(
+                    chat_embedding_store = app.embedding_store or NullEmbeddingStore()
+                    if not ask_info.get("chunked_source"):
+                        question_memory = store_user_question(
+                            workspace_graph_id=workspace_id,
+                            text=question,
+                            storage=storage,
+                            runtime_config=app.runtime_config,
+                            provider=app.provider,
+                            embedding_store=chat_embedding_store,
+                            source_run_id=run_id,
+                            turn=turn_idx,
+                        )
+                    else:
+                        question_memory = None
+
+                    answer_memory = store_assistant_answer(
                         workspace_graph_id=workspace_id,
-                        kind="turn",
-                        text=f"Q: {question}\nA: {answer.text}",
+                        text=answer.text,
+                        storage=storage,
                         runtime_config=app.runtime_config,
                         provider=app.provider,
-                        embedding_store=app.embedding_store,
-                        storage=storage,
+                        embedding_store=chat_embedding_store,
                         source_run_id=run_id,
+                        turn=turn_idx,
                     )
 
                     if prev_task_graph_id is not None:
@@ -528,7 +550,7 @@ def main() -> None:
                             )
                         )
 
-                    if final_id is not None:
+                    if final_id is not None and answer_memory is not None:
                         storage.persist_workspace_edge(
                             WorkspaceEdge(
                                 id=new_id("edge"),
@@ -537,7 +559,7 @@ def main() -> None:
                                 from_type="node",
                                 from_id=final_id,
                                 to_type="memory_item",
-                                to_id=memory.id,
+                                to_id=answer_memory.id,
                                 reason="final node answer stored as workspace memory",
                             )
                         )
@@ -764,14 +786,18 @@ def main() -> None:
             console.print(f"[dim]── turn {turn}  |  [fast path]{ctx_label}[/dim]")
             console.print()
         else:
+            ask_info = {}
             try:
-                turn_task_graph_id = app.compile(workspace_id, text)
-                turn_run_id = app.run(turn_task_graph_id)
-                turn_analysis = app.query_run(turn_run_id)
-                last_analysis = turn_analysis
-                if turn_analysis:
-                    prompt_artifacts = [a for a in turn_analysis.artifacts if a.port == "prompt"]
-                    turn_context_length = sum(a.token_count for a in prompt_artifacts) if prompt_artifacts else None
+                turn_answer = app.ask(workspace_id, text, out_info=ask_info)
+                turn_run_id = ask_info.get("run_id", "")
+                turn_task_graph_id = ask_info.get("task_graph_id") or ""
+                if turn_run_id:
+                    turn_analysis = app.query_run(turn_run_id)
+                    last_analysis = turn_analysis
+                    if turn_analysis:
+                        prompt_artifacts = [a for a in turn_analysis.artifacts if a.port == "prompt"]
+                        turn_context_length = sum(a.token_count for a in prompt_artifacts) if prompt_artifacts else None
+                        turn_goal_action = turn_analysis.task_graph.metadata.get("goal_action", "")
             except CompilationError as exc:
                 turn_status = "failed"
                 turn_error = f"Planner failed to compile after {exc.attempts} attempt(s): {exc.last_errors}"
@@ -789,7 +815,6 @@ def main() -> None:
 
             if turn_analysis:
                 final_id = _final_node_id(turn_analysis)
-                turn_answer = _extract_answer(turn_analysis, final_id)
 
                 if turn_answer.text:
                     console.print(Markdown(turn_answer.text))
@@ -798,22 +823,34 @@ def main() -> None:
                 else:
                     console.print("[dim](no output)[/dim]")
 
-                turn_goal_action = turn_analysis.task_graph.metadata.get("goal_action", "")
                 tg_short = turn_task_graph_id.split("_")[-1][:12]
                 ctx_label = f"  |  ctx={turn_context_length}tk" if turn_context_length is not None else ""
                 console.print(f"[dim]── turn {turn}  |  goal: {turn_goal_action}  |  tg: {tg_short}{ctx_label}[/dim]")
 
-                # Persist turn as a MemoryItem so future turns can retrieve it as context.
-                # write_memory_item also embeds the text when embeddings_enabled=True.
-                memory = write_memory_item(
+                chat_embedding_store = app.embedding_store or NullEmbeddingStore()
+                if not ask_info.get("chunked_source"):
+                    question_memory = store_user_question(
+                        workspace_graph_id=workspace_id,
+                        text=text,
+                        storage=storage,
+                        runtime_config=app.runtime_config,
+                        provider=app.provider,
+                        embedding_store=chat_embedding_store,
+                        source_run_id=turn_run_id,
+                        turn=turn,
+                    )
+                else:
+                    question_memory = None
+
+                answer_memory = store_assistant_answer(
                     workspace_graph_id=workspace_id,
-                    kind="turn",
-                    text=f"Q: {text}\nA: {turn_answer.text}",
+                    text=turn_answer.text,
+                    storage=storage,
                     runtime_config=app.runtime_config,
                     provider=app.provider,
-                    embedding_store=app.embedding_store,
-                    storage=storage,
+                    embedding_store=chat_embedding_store,
                     source_run_id=turn_run_id,
+                    turn=turn,
                 )
 
                 # FOLLOWS_UP: new task graph → previous task graph
@@ -833,18 +870,20 @@ def main() -> None:
 
                 # PRODUCED: final node → MemoryItem
                 if final_id is not None:
-                    storage.persist_workspace_edge(
-                        WorkspaceEdge(
-                            id=new_id("edge"),
-                            workspace_graph_id=workspace_id,
-                            edge_type=WorkspaceEdgeType.PRODUCED,
-                            from_type="node",
-                            from_id=final_id,
-                            to_type="memory_item",
-                            to_id=memory.id,
-                            reason="final node answer stored as workspace memory",
+                    memory_for_produced = answer_memory if answer_memory is not None else question_memory
+                    if memory_for_produced is not None:
+                        storage.persist_workspace_edge(
+                            WorkspaceEdge(
+                                id=new_id("edge"),
+                                workspace_graph_id=workspace_id,
+                                edge_type=WorkspaceEdgeType.PRODUCED,
+                                from_type="node",
+                                from_id=final_id,
+                                to_type="memory_item",
+                                to_id=memory_for_produced.id,
+                                reason="final node answer stored as workspace memory",
+                            )
                         )
-                    )
 
                 previous_task_graph_id = turn_task_graph_id
                 console.print()

@@ -311,7 +311,7 @@ class Compiler:
             for edge in canonical_edges
             if edge.from_node in name_to_id and edge.to_node in name_to_id
         ]
-        metadata: dict[str, Any] = {
+        graph_metadata: dict[str, Any] = {
             **proposal.metadata,
             "intent": proposal.intent,
             "goal_action": proposal.goal_action.value,
@@ -325,7 +325,7 @@ class Compiler:
                 root_prompt_node_id=nodes[0].id if nodes else None,
                 nodes=nodes,
                 task_edges=edges,
-                metadata=metadata,
+                metadata=graph_metadata,
             ),
             issues,
         )

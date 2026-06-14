@@ -8,12 +8,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
-
 from llmasm.config import RuntimeConfig
 from llmasm.graph.models import MemoryItem, Node, Run
 from llmasm.providers.base import LLMProvider
 from llmasm.storage.base import ContextItem, Storage
 from llmasm.storage.embeddings import EmbeddingStore, ScoredMatch
+
+_SUMMARY_RESERVE_TOKENS = 128
 
 log = logging.getLogger(__name__)
 
@@ -128,7 +129,7 @@ def select_context(
     # ── Word-overlap items ─────────────────────────────────────────────────
     text_items: list[ContextItem] = []
     if hasattr(storage, "retrieve_workspace_context"):
-        text_items = storage.retrieve_workspace_context(workspace_ids, query, budget, {})  # type: ignore[attr-defined]
+        text_items = storage.retrieve_workspace_context(workspace_ids, query, budget, {})
 
     # ── Merge: deduplicate by item id, keep highest score ─────────────────
     by_id: dict[str, ContextItem] = {}
@@ -137,9 +138,24 @@ def select_context(
             by_id[ctx_item.id] = ctx_item
     items = list(by_id.values())
 
-    ranked = sorted(items, key=lambda item: (item.score, -item.token_count), reverse=True)
     min_score = runtime_config.context_min_score
-    ranked = [item for item in ranked if item.score >= min_score]
+
+    # ── Split source passages into summaries and chunks ─────────────────────
+    summary_items = [item for item in items if _is_source_summary(item)]
+    chunk_items = sorted(
+        [item for item in items if _is_source_chunk(item) and item.score >= min_score],
+        key=lambda item: (item.score, -item.token_count),
+        reverse=True,
+    )
+    other_items = sorted(
+        [item for item in items if not _is_source_summary(item) and not _is_source_chunk(item) and item.score >= min_score],
+        key=lambda item: (item.score, -item.token_count),
+        reverse=True,
+    )
+
+    # Reserve a small budget for summaries and place them first.
+    summary_budget = min(_SUMMARY_RESERVE_TOKENS, budget)
+    ranked = _trim(summary_items, summary_budget) + chunk_items + other_items
 
     # ── LLM relevance filter (opt-in) ──────────────────────────────────────
     if runtime_config.llm_context_filter and ranked:
@@ -151,6 +167,24 @@ def select_context(
         )
 
     return SelectedContext(items=_trim(ranked, budget), direct_inputs=direct_inputs)
+
+
+def _is_source_summary(item: ContextItem) -> bool:
+    underlying: object = item.item
+    return (
+        isinstance(underlying, MemoryItem)
+        and underlying.kind == "source_passage"
+        and underlying.metadata.get("is_summary") is True
+    )
+
+
+def _is_source_chunk(item: ContextItem) -> bool:
+    underlying: object = item.item
+    return (
+        isinstance(underlying, MemoryItem)
+        and underlying.kind == "source_passage"
+        and underlying.metadata.get("is_summary") is not True
+    )
 
 
 def _trim(items: list[ContextItem], budget: int) -> list[ContextItem]:
