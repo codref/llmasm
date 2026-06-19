@@ -230,6 +230,12 @@ class Executor:
                     token_json=result.token_usage or {},
                 )
             )
+            # Stash the embedding search query on the node state so callers can
+            # inspect what was actually embedded (e.g. after LLM rewrite).
+            if selected.search_query:
+                state = self._state(run.id, node.id)
+                state.metadata["search_query"] = selected.search_query
+                self.storage.update_run_node_state(state)
             return output
         if node.kind == NodeKind.FINAL:
             input_value = next(iter(direct_inputs.values()), RawText(text=""))
@@ -416,6 +422,10 @@ class Executor:
         if context_items:
             prior = "\n".join(item.text for item in context_items)
             grounding_mode = node.metadata.get("grounding_mode", "permissive")
+            focus_clause = (
+                "Focus on the current task above. "
+                "Do NOT re-answer earlier questions that may appear in the context."
+            )
             if grounding_mode == "strict":
                 instruction = (
                     f"{instruction}\n\n"
@@ -423,7 +433,8 @@ class Executor:
                     f"Answer using ONLY the context above. "
                     f"Base your answer on the information in the context, including what it implies or contradicts. "
                     f"If the context contains no relevant information at all, say that the provided context does not contain the answer. "
-                    f"Do not use outside knowledge."
+                    f"Do not use outside knowledge. "
+                    f"{focus_clause}"
                 )
             else:
                 instruction = (
@@ -431,7 +442,8 @@ class Executor:
                     f"--- Prior conversation ---\n{prior}\n---\n\n"
                     f"Use the prior conversation above as the primary source. "
                     f"If the answer is in the context above, answer from it. "
-                    f"If the context does not contain the answer, you may use your own knowledge."
+                    f"If the context does not contain the answer, you may use your own knowledge. "
+                    f"{focus_clause}"
                 )
         payload: dict[str, Any] = {
             "instruction": instruction,

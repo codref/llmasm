@@ -19,22 +19,22 @@ services:
       timeout: 5s
       retries: 20
 
-  graph-viewer:
-    build:
-      context: ./docker/graph-viewer
-    container_name: llmasm-graph-viewer
-    ports:
-      - "${GRAPH_VIEWER_PORT:-3000}:3000"
-    environment:
-      GRAPH_VIEWER_DATA: /app/data/graph.json
-      DATABASE_URL: "postgresql://${POSTGRES_USER:-llmasm}:${POSTGRES_PASSWORD:-llmasm}@postgres:5432/${POSTGRES_DB:-llmasm}"
-    volumes:
-      - ./docker/graph-viewer/data:/app/data:ro
-      - ./docker/graph-viewer/server.py:/app/server.py:ro
-      - ./docker/graph-viewer/static:/app/static:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
+  # graph-viewer:
+  #   build:
+  #     context: ./docker/graph-viewer
+  #   container_name: llmasm-graph-viewer
+  #   ports:
+  #     - "${GRAPH_VIEWER_PORT:-3000}:3000"
+  #   environment:
+  #     GRAPH_VIEWER_DATA: /app/data/graph.json
+  #     DATABASE_URL: "postgresql://${POSTGRES_USER:-llmasm}:${POSTGRES_PASSWORD:-llmasm}@postgres:5432/${POSTGRES_DB:-llmasm}"
+  #   volumes:
+  #     - ./docker/graph-viewer/data:/app/data:ro
+  #     - ./docker/graph-viewer/server.py:/app/server.py:ro
+  #     - ./docker/graph-viewer/static:/app/static:ro
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
 
 volumes:
   llmasm-postgres-data:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 from pydantic import BaseModel
@@ -17,7 +18,7 @@ from llmasm.graph.transforms import default_transform_registry
 from llmasm.graph.validation import validate_required_ports, validate_tools
 from llmasm.ids import new_id
 from llmasm.runtime.executor import Executor
-from llmasm.schemas import ConversationRecord, ConversationText, FinalAnswer
+from llmasm.schemas import ConversationRecord, ConversationText, FinalAnswer, RawText
 from llmasm.storage.embeddings import InMemoryEmbeddingStore, NullEmbeddingStore, embed_and_persist
 from llmasm.tools.base import ToolSpec
 from llmasm.storage.memory import InMemoryStorage
@@ -538,7 +539,7 @@ def test_select_context_vector_path_returns_memory_items() -> None:
         task_graph_id=tg_id,
         kind=NodeKind.MODEL,
         name="summarize",
-        metadata={"instruction": "summarize"},
+        metadata={"instruction": "summarize", "context_memory_kinds": ["fact"]},
     )
     storage.persist_task_graph(
         TaskGraph(id=tg_id, workspace_graph_id=workspace_id, nodes=[node])
@@ -694,3 +695,420 @@ def test_router_model_assisted_selects_branch() -> None:
     states = {s.node_id: s for s in storage.list_run_node_states(run.id)}
     assert states[n_yes.id].status == NodeStatus.SUCCEEDED
     assert states[n_no.id].status == NodeStatus.SKIPPED
+
+
+def test_select_context_excludes_conversation_items_by_default() -> None:
+    """Old user_question / assistant_answer items should not leak into model prompts."""
+    from llmasm.graph.models import MemoryItem, Run
+    from llmasm.runtime.context import select_context
+
+    storage = InMemoryStorage()
+    workspace_id = new_id("workspace")
+    storage.create_workspace_graph(WorkspaceGraph(id=workspace_id, name="test"))
+
+    source = MemoryItem(
+        id=new_id("memory"),
+        workspace_graph_id=workspace_id,
+        kind="source_passage",
+        text="The answer is that the project uses PostgreSQL.",
+    )
+    old_question = MemoryItem(
+        id=new_id("memory"),
+        workspace_graph_id=workspace_id,
+        kind="user_question",
+        text="What database does the project use?",
+    )
+    for item in [source, old_question]:
+        storage.persist_memory_item(item)
+
+    tg_id = new_id("taskgraph")
+    node = Node(
+        id=new_id("node"),
+        workspace_graph_id=workspace_id,
+        task_graph_id=tg_id,
+        kind=NodeKind.MODEL,
+        name="answer",
+        metadata={"instruction": "answer"},
+    )
+    storage.persist_task_graph(
+        TaskGraph(id=tg_id, workspace_graph_id=workspace_id, nodes=[node])
+    )
+    run = Run(id=new_id("run"), workspace_graph_id=workspace_id, task_graph_id=tg_id)
+    storage.create_run(run)
+
+    result = select_context(
+        storage=storage,
+        runtime_config=RuntimeConfig(),
+        run=run,
+        node=node,
+        direct_inputs={},
+        embedding_store=NullEmbeddingStore(),
+        provider=FakeProvider(),
+    )
+
+    assert any(ci.text == source.text for ci in result.items)
+    assert not any("user_question" in str(ci.item) for ci in result.items)
+
+
+def test_select_context_node_opt_in_conversation_items() -> None:
+    """A node can opt-in to retrieving conversation items via metadata."""
+    from llmasm.graph.models import MemoryItem, Run
+    from llmasm.runtime.context import select_context
+
+    storage = InMemoryStorage()
+    workspace_id = new_id("workspace")
+    storage.create_workspace_graph(WorkspaceGraph(id=workspace_id, name="test"))
+
+    old_answer = MemoryItem(
+        id=new_id("memory"),
+        workspace_graph_id=workspace_id,
+        kind="assistant_answer",
+        text="The follow up answer is 42.",
+    )
+    storage.persist_memory_item(old_answer)
+
+    tg_id = new_id("taskgraph")
+    node = Node(
+        id=new_id("node"),
+        workspace_graph_id=workspace_id,
+        task_graph_id=tg_id,
+        kind=NodeKind.MODEL,
+        name="follow_up",
+        metadata={"instruction": "follow up", "context_memory_kinds": ["assistant_answer"]},
+    )
+    storage.persist_task_graph(
+        TaskGraph(id=tg_id, workspace_graph_id=workspace_id, nodes=[node])
+    )
+    run = Run(id=new_id("run"), workspace_graph_id=workspace_id, task_graph_id=tg_id)
+    storage.create_run(run)
+
+    result = select_context(
+        storage=storage,
+        runtime_config=RuntimeConfig(),
+        run=run,
+        node=node,
+        direct_inputs={},
+        embedding_store=NullEmbeddingStore(),
+        provider=FakeProvider(),
+    )
+
+    assert any(ci.text == old_answer.text for ci in result.items)
+
+
+def test_select_context_sufficiency_threshold_skips_workspace_retrieval() -> None:
+    """When direct inputs already exceed the token threshold, skip embedding search."""
+    from llmasm.graph.models import MemoryItem, Run
+    from llmasm.runtime.context import select_context
+
+    storage = InMemoryStorage()
+    workspace_id = new_id("workspace")
+    storage.create_workspace_graph(WorkspaceGraph(id=workspace_id, name="test"))
+
+    source = MemoryItem(
+        id=new_id("memory"),
+        workspace_graph_id=workspace_id,
+        kind="source_passage",
+        text="Lots of relevant context already present.",
+    )
+    storage.persist_memory_item(source)
+
+    tg_id = new_id("taskgraph")
+    node = Node(
+        id=new_id("node"),
+        workspace_graph_id=workspace_id,
+        task_graph_id=tg_id,
+        kind=NodeKind.MODEL,
+        name="answer",
+        metadata={"instruction": "answer"},
+    )
+    storage.persist_task_graph(
+        TaskGraph(id=tg_id, workspace_graph_id=workspace_id, nodes=[node])
+    )
+    run = Run(id=new_id("run"), workspace_graph_id=workspace_id, task_graph_id=tg_id)
+    storage.create_run(run)
+
+    provider = FakeProvider()
+    result = select_context(
+        storage=storage,
+        runtime_config=RuntimeConfig(
+            prefer_run_context=True,
+            context_sufficiency_threshold_tokens=10,
+        ),
+        run=run,
+        node=node,
+        direct_inputs={"input": RawText(text="This direct input is long enough to satisfy the threshold.")},
+        embedding_store=NullEmbeddingStore(),
+        provider=provider,
+    )
+
+    assert provider.embed_calls == 0
+    assert result.items == []
+
+
+def test_select_context_search_query_rewrite_when_enabled() -> None:
+    """When llm_query_rewrite is enabled, the embedded query is rewritten."""
+    from llmasm.graph.models import MemoryItem, Run
+    from llmasm.runtime.context import select_context
+
+    storage = InMemoryStorage()
+    workspace_id = new_id("workspace")
+    storage.create_workspace_graph(WorkspaceGraph(id=workspace_id, name="test"))
+
+    question = MemoryItem(
+        id=new_id("memory"),
+        workspace_graph_id=workspace_id,
+        kind="user_question",
+        text="How long was he on the show?",
+    )
+    answer = MemoryItem(
+        id=new_id("memory"),
+        workspace_graph_id=workspace_id,
+        kind="assistant_answer",
+        text="Dennis Farina was on Law & Order.",
+    )
+    for item in [question, answer]:
+        storage.persist_memory_item(item)
+
+    tg_id = new_id("taskgraph")
+    node = Node(
+        id=new_id("node"),
+        workspace_graph_id=workspace_id,
+        task_graph_id=tg_id,
+        kind=NodeKind.MODEL,
+        name="answer",
+        metadata={"instruction": "answer"},
+    )
+    storage.persist_task_graph(
+        TaskGraph(id=tg_id, workspace_graph_id=workspace_id, nodes=[node])
+    )
+    run = Run(id=new_id("run"), workspace_graph_id=workspace_id, task_graph_id=tg_id)
+    storage.create_run(run)
+
+    provider = FakeProvider(model_text="How long was Dennis Farina on Law & Order?")
+    result = select_context(
+        storage=storage,
+        runtime_config=RuntimeConfig(
+            llm_query_rewrite=True,
+            embeddings_enabled=True,
+            embedding_model="nomic-embed-text",
+        ),
+        run=run,
+        node=node,
+        direct_inputs={},
+        embedding_store=NullEmbeddingStore(),
+        provider=provider,
+    )
+
+    assert result.search_query == "How long was Dennis Farina on Law & Order?"
+    assert any("How long" in prompt for prompt in provider.generate_prompts)
+
+
+def test_select_context_uses_run_metadata_search_query() -> None:
+    """When the run carries a pre-computed search_query, select_context should not recompute it."""
+    from llmasm.graph.models import MemoryItem, Run
+    from llmasm.runtime.context import select_context
+
+    storage = InMemoryStorage()
+    workspace_id = new_id("workspace")
+    storage.create_workspace_graph(WorkspaceGraph(id=workspace_id, name="test"))
+
+    question = MemoryItem(
+        id=new_id("memory"),
+        workspace_graph_id=workspace_id,
+        kind="user_question",
+        text="What about him?",
+    )
+    answer = MemoryItem(
+        id=new_id("memory"),
+        workspace_graph_id=workspace_id,
+        kind="assistant_answer",
+        text="Dennis Farina was on Law & Order.",
+    )
+    source = MemoryItem(
+        id=new_id("memory"),
+        workspace_graph_id=workspace_id,
+        kind="source_passage",
+        text="The follow up answer is on the show.",
+    )
+    for item in [question, answer, source]:
+        storage.persist_memory_item(item)
+
+    tg_id = new_id("taskgraph")
+    node = Node(
+        id=new_id("node"),
+        workspace_graph_id=workspace_id,
+        task_graph_id=tg_id,
+        kind=NodeKind.MODEL,
+        name="answer",
+        metadata={"instruction": "answer"},
+    )
+    storage.persist_task_graph(
+        TaskGraph(id=tg_id, workspace_graph_id=workspace_id, nodes=[node])
+    )
+    run = Run(
+        id=new_id("run"),
+        workspace_graph_id=workspace_id,
+        task_graph_id=tg_id,
+        metadata={"search_query": "How long was Dennis Farina on Law & Order?"},
+    )
+    storage.create_run(run)
+
+    provider = FakeProvider(model_text="rewritten")
+    result = select_context(
+        storage=storage,
+        runtime_config=RuntimeConfig(llm_query_rewrite=True),
+        run=run,
+        node=node,
+        direct_inputs={},
+        embedding_store=NullEmbeddingStore(),
+        provider=provider,
+    )
+
+    assert result.search_query == "How long was Dennis Farina on Law & Order?"
+    # No rewrite LLM call should have been made because the query was cached on the run.
+    assert not provider.generate_prompts
+
+
+def test_compiler_repairs_malformed_schema_refs() -> None:
+    """The compiler should recover from schema placeholders emitted by weak planners."""
+    schemas = default_schema_registry()
+    provider = FakeProvider(
+        [
+            json.dumps(
+                {
+                    "intent": "answer question",
+                    "goal_action": "new",
+                    "nodes": [
+                        {"name": "intent", "kind": "intent", "metadata": {"output": {"text": "q"}}},
+                        {
+                            "name": "answer",
+                            "kind": "model",
+                            "input_schema": "#nodes.intent.output",
+                            "output_schema": "#0",
+                            "ports": [
+                                {"name": "input", "direction": "input", "schema_ref": "#"},
+                                {"name": "output", "direction": "output", "schema_ref": "$ref"},
+                            ],
+                        },
+                        {"name": "final", "kind": "final", "input_schema": ""},
+                    ],
+                    "edges": [],
+                }
+            )
+        ],
+        model_text="answer",
+    )
+    storage = InMemoryStorage()
+    app = LLMASM(storage=storage, provider=provider, schema_registry=schemas)
+    workspace_id = app.create_workspace("test")
+
+    task_graph_id = app.compile(workspace_id, "question")
+    graph = storage.load_task_graph(task_graph_id)
+    answer = next(n for n in graph.nodes if n.name == "answer")
+    final = next(n for n in graph.nodes if n.kind == NodeKind.FINAL)
+
+    assert answer.input_schema == "RawText"
+    assert answer.output_schema == "Summary"
+    assert {p.name: p.schema_ref for p in answer.ports} == {
+        "input": "RawText",
+        "output": "Summary",
+    }
+    assert final.input_schema == "Summary"
+    assert final.output_schema == "FinalAnswer"
+
+
+def test_compiler_wires_disconnected_multi_model_graph() -> None:
+    """Disconnected multi-model proposals are wired so every node runs."""
+    schemas = default_schema_registry()
+    provider = FakeProvider(
+        [
+            json.dumps(
+                {
+                    "intent": "answer question",
+                    "goal_action": "new",
+                    "nodes": [
+                        {"name": "intent", "kind": "intent", "metadata": {"output": {"text": "q"}}},
+                        {"name": "summarize_source", "kind": "model"},
+                        {"name": "answer", "kind": "model"},
+                        {"name": "final", "kind": "final"},
+                    ],
+                    "edges": [],
+                }
+            )
+        ],
+        model_text="answer",
+    )
+    storage = InMemoryStorage()
+    app = LLMASM(storage=storage, provider=provider, schema_registry=schemas)
+    workspace_id = app.create_workspace("test")
+
+    task_graph_id = app.compile(workspace_id, "question")
+    graph = storage.load_task_graph(task_graph_id)
+    edges = {(e.from_node_id, e.to_node_id) for e in graph.task_edges}
+    name_to_id = {n.name: n.id for n in graph.nodes}
+
+    assert (name_to_id["intent"], name_to_id["summarize_source"]) in edges
+    assert (name_to_id["intent"], name_to_id["answer"]) in edges
+    assert (name_to_id["answer"], name_to_id["final"]) in edges
+
+
+def test_compiler_repairs_model_with_finalanswer_output() -> None:
+    """A model node emitting FinalAnswer is repaired to Summary."""
+    schemas = default_schema_registry()
+    provider = FakeProvider(
+        [
+            json.dumps(
+                {
+                    "intent": "answer question",
+                    "goal_action": "new",
+                    "nodes": [
+                        {"name": "intent", "kind": "intent", "metadata": {"output": {"text": "q"}}},
+                        {"name": "answer", "kind": "model", "output_schema": "FinalAnswer"},
+                        {"name": "final", "kind": "final"},
+                    ],
+                    "edges": [{"from_node": "intent", "to_node": "answer"}, {"from_node": "answer", "to_node": "final"}],
+                }
+            )
+        ],
+        model_text="answer",
+    )
+    storage = InMemoryStorage()
+    app = LLMASM(storage=storage, provider=provider, schema_registry=schemas)
+    workspace_id = app.create_workspace("test")
+
+    task_graph_id = app.compile(workspace_id, "question")
+    graph = storage.load_task_graph(task_graph_id)
+    answer = next(n for n in graph.nodes if n.name == "answer")
+    assert answer.output_schema == "Summary"
+
+
+def test_compiler_converts_unknown_tool_node_to_model() -> None:
+    """A tool node referencing no registered tool is converted to a model node."""
+    schemas = default_schema_registry()
+    provider = FakeProvider(
+        [
+            json.dumps(
+                {
+                    "intent": "answer question",
+                    "goal_action": "new",
+                    "nodes": [
+                        {"name": "intent", "kind": "intent", "metadata": {"output": {"text": "q"}}},
+                        {"name": "edge1", "kind": "tool"},
+                        {"name": "final", "kind": "final"},
+                    ],
+                    "edges": [],
+                }
+            )
+        ],
+        model_text="answer",
+    )
+    storage = InMemoryStorage()
+    app = LLMASM(storage=storage, provider=provider, schema_registry=schemas)
+    workspace_id = app.create_workspace("test")
+
+    task_graph_id = app.compile(workspace_id, "question")
+    graph = storage.load_task_graph(task_graph_id)
+    edge1 = next(n for n in graph.nodes if n.name == "edge1")
+    assert edge1.kind == NodeKind.MODEL
+    assert edge1.input_schema == "RawText"
+    assert edge1.output_schema == "Summary"

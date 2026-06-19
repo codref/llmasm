@@ -252,9 +252,12 @@ class InMemoryStorage:
         query: str,
         filters: dict[str, Any] | None = None,
         limit: int = 20,
+        kinds: set[str] | None = None,
     ) -> list[MemoryItem]:
         filters = filters or {}
         items = self.list_memory_items(workspace_graph_id)
+        if kinds is not None:
+            items = [item for item in items if item.kind in kinds]
         for key, value in filters.items():
             if value is None:
                 continue
@@ -267,11 +270,12 @@ class InMemoryStorage:
         query: str,
         budget_tokens: int,
         filters: dict[str, Any] | None = None,
+        kinds: set[str] | None = None,
     ) -> list[ContextItem]:
         ids = [workspace_graph_id] if isinstance(workspace_graph_id, str) else workspace_graph_id
         all_items: list[MemoryItem] = []
         for ws_id in ids:
-            all_items.extend(self.search_memory(ws_id, query, filters, limit=50))
+            all_items.extend(self.search_memory(ws_id, query, filters, limit=50, kinds=kinds))
         ranked = sorted(all_items, key=lambda item: _word_overlap_score(query, item.text), reverse=True)
         total = 0
         context: list[ContextItem] = []

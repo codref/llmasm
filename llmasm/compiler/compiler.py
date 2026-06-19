@@ -6,7 +6,7 @@ import json
 from typing import Any, Literal, cast
 
 from llmasm.compiler.prompt import PriorContext, render_planner_prompt
-from llmasm.compiler.proposal import ProposalEdge, ProposalNode, TaskGraphProposal
+from llmasm.compiler.proposal import ProposalEdge, ProposalExecution, ProposalNode, TaskGraphProposal
 from llmasm.compiler.repair import compile_with_repair
 from llmasm.config import RuntimeConfig
 from llmasm.errors import CompilationError
@@ -202,17 +202,22 @@ class Compiler:
         name_to_id: dict[str, str] = {}
         nodes: list[Node] = []
         issues: list[ValidationIssue] = []
-        if not any(node.kind == NodeKind.INTENT for node in proposal.nodes):
+        # Pre-process: convert tool nodes that reference no registered tool into
+        # model nodes. Weak planners sometimes hallucinate tool names or reuse
+        # edge names as node names.
+        proposal_nodes = [
+            self._recover_hallucinated_tool(node) for node in proposal.nodes
+        ]
+        proposal_edges = list(proposal.edges)
+
+        if not any(node.kind == NodeKind.INTENT for node in proposal_nodes):
             prompt_node = ProposalNode(
                 name="root_prompt",
                 kind=NodeKind.INTENT,
                 output_schema="RawText",
                 metadata={"prompt": prompt},
             )
-            proposal_nodes = [prompt_node, *proposal.nodes]
-        else:
-            proposal_nodes = list(proposal.nodes)
-        proposal_edges = list(proposal.edges)
+            proposal_nodes = [prompt_node, *proposal_nodes]
         if not any(node.kind == NodeKind.FINAL for node in proposal_nodes):
             # Auto-inject a final node, mirroring intent auto-injection.
             # Find the sink: a model/compress node with no outgoing edges.
@@ -254,12 +259,16 @@ class Compiler:
                     )
                     continue
                 # canonical is 'input' or 'output' by construction of the synonyms map.
+                direction = cast(Literal["input", "output"], canonical)
+                clean_ref = self._clean_schema_ref(port.schema_ref)
+                if clean_ref is None:
+                    clean_ref = input_schema if direction == "input" else output_schema
                 ports.append(
                     Port(
                         node_id=node_id,
                         name=port.name,
-                        direction=cast(Literal["input", "output"], canonical),
-                        schema_ref=port.schema_ref,
+                        direction=direction,
+                        schema_ref=clean_ref or "RawText",
                         required=port.required,
                     )
                 )
@@ -330,20 +339,66 @@ class Compiler:
             issues,
         )
 
+    def _recover_hallucinated_tool(self, proposed: ProposalNode) -> ProposalNode:
+        """Convert a tool node with no registered tool into a generic model node."""
+        if proposed.kind != NodeKind.TOOL:
+            return proposed
+        execution_dump = proposed.execution.model_dump(exclude_none=True)
+        tool_name = execution_dump.get("tool") or self._infer_tool_name(proposed.name)
+        if not tool_name or not self.tool_registry.has(str(tool_name)):
+            return proposed.model_copy(
+                update={
+                    "kind": NodeKind.MODEL,
+                    "execution": ProposalExecution(),
+                }
+            )
+        return proposed
+
+    @staticmethod
+    def _clean_schema_ref(value: Any) -> str | None:
+        """Sanitize a schema reference emitted by the planner.
+
+        Some models return JSONPath-like placeholders (e.g. '#0', '#nodes.x.output',
+        '$ref') or empty strings instead of real schema names. Treat those as
+        missing so the canonical defaults can apply.
+        """
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        if not value:
+            return None
+        if value.startswith("#") or value.startswith("$"):
+            return None
+        if any(c in value for c in "/[]{}()"):
+            return None
+        return value
+
     def _canonical_node_fields(
         self, proposed: ProposalNode
     ) -> tuple[str | None, str | None, dict[str, Any], dict[str, Any]]:
         metadata = dict(proposed.metadata)
         execution = proposed.execution.model_dump(exclude_none=True)
-        input_schema = proposed.input_schema or self._metadata_string(metadata, "input_schema")
-        output_schema = proposed.output_schema or self._metadata_string(metadata, "output_schema")
+        input_schema = (
+            self._clean_schema_ref(proposed.input_schema)
+            or self._clean_schema_ref(self._metadata_string(metadata, "input_schema"))
+        )
+        output_schema = (
+            self._clean_schema_ref(proposed.output_schema)
+            or self._clean_schema_ref(self._metadata_string(metadata, "output_schema"))
+        )
         if proposed.kind == NodeKind.INTENT:
+            input_schema = None
             output_schema = "RawText"  # always; planner must not override
         if proposed.kind == NodeKind.FINAL:
-            input_schema = input_schema or "Summary"
+            input_schema = "Summary"  # always; planner must not override
             output_schema = "FinalAnswer"  # always; planner must not override
         if proposed.kind in {NodeKind.MODEL, NodeKind.COMPRESS}:
+            # Preserve a valid, non-placeholder input schema; otherwise default.
             input_schema = input_schema or "RawText"
+            # Model/compress nodes are processing nodes; their output must be a
+            # structured intermediate schema, never a terminal placeholder.
+            if output_schema == "FinalAnswer":
+                output_schema = "Summary"
             output_schema = output_schema or "Summary"
         if proposed.kind == NodeKind.TOOL:
             tool_name = execution.get("tool")
@@ -385,43 +440,50 @@ class Compiler:
     def _canonical_edges(
         self, nodes: list[ProposalNode], edges: list[Any]
     ) -> list[Any]:
+        """Normalize planner-emitted edges into a connected DAG.
+
+        If the proposal does not contain routers, we ensure every processing node
+        has an incoming edge from the intent and the final node has an incoming
+        edge from a suitable sink.  This recovers from weak planners that emit
+        disconnected nodes while preserving explicit transforms on edges the
+        planner did emit.
+        """
         canonical = list(edges)
-        intent = self._single_node(nodes, NodeKind.INTENT)
-        tool = self._single_node(nodes, NodeKind.TOOL)
-        model = self._single_node(nodes, NodeKind.MODEL)
-        final = self._single_node(nodes, NodeKind.FINAL)
 
-        # No-tool linear path: intent → model → final
-        # Strip all edges between the three canonical nodes and re-wire cleanly
-        # to guard against any planner-emitted backwards/wrong edges.
-        if intent and not tool and model and final:
-            node_names = {intent.name, model.name, final.name}
-            canonical = [
-                edge for edge in canonical
-                if not (edge.from_node in node_names and edge.to_node in node_names)
+        # Do not interfere with explicit branching/routers.
+        if any(node.kind == NodeKind.ROUTER for node in nodes):
+            return canonical
+
+        intents = [node for node in nodes if node.kind == NodeKind.INTENT]
+        finals = [node for node in nodes if node.kind == NodeKind.FINAL]
+        if not intents or not finals:
+            return canonical
+
+        # If there are no processing nodes, there's nothing to wire.
+        processing_kinds = {NodeKind.TOOL, NodeKind.MODEL, NodeKind.COMPRESS}
+        if not any(node.kind in processing_kinds for node in nodes):
+            return canonical
+
+        intent = intents[0]
+        final = finals[0]
+
+        # Ensure every tool/model/compress has an incoming edge.
+        to_node_names = {edge.to_node for edge in canonical}
+        for node in nodes:
+            if node.kind in processing_kinds and node.name not in to_node_names:
+                canonical.append(ProposalEdge(from_node=intent.name, to_node=node.name))
+
+        # Ensure the final node has an incoming edge from a sink.
+        if final.name not in to_node_names:
+            sinks = [
+                node
+                for node in nodes
+                if node.kind in processing_kinds
+                and not any(edge.from_node == node.name for edge in canonical)
             ]
-            self._ensure_edge(canonical, intent.name, model.name)
-            self._ensure_edge(canonical, model.name, final.name)
-            return canonical
+            if sinks:
+                canonical.append(ProposalEdge(from_node=sinks[-1].name, to_node=final.name))
 
-        # Full tool path: intent → tool → model → final (only when all four present)
-        if not (intent and tool and model and final):
-            return canonical
-        tool_input, tool_output, _, _ = self._canonical_node_fields(tool)
-        model_input, _, _, _ = self._canonical_node_fields(model)
-        if tool_input != "RawText" or tool_output != "RawText" or model_input != "RawText":
-            return canonical
-        canonical = [
-            edge
-            for edge in canonical
-            if not (
-                edge.from_node == intent.name
-                and edge.to_node in {model.name, final.name}
-            )
-        ]
-        self._ensure_edge(canonical, intent.name, tool.name)
-        self._ensure_edge(canonical, tool.name, model.name)
-        self._ensure_edge(canonical, model.name, final.name)
         return canonical
 
     def _single_node(self, nodes: list[ProposalNode], kind: NodeKind) -> ProposalNode | None:

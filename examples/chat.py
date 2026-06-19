@@ -312,6 +312,13 @@ def parse_args() -> argparse.Namespace:
         help="Truncate assistant answers in Q/A context to N characters (fast-path only)",
     )
     parser.add_argument(
+        "--context-sufficiency-threshold-tokens",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Skip embedding search when direct inputs already provide at least N tokens of context (planner mode)",
+    )
+    parser.add_argument(
         "--reset-embeddings",
         action="store_true",
         default=False,
@@ -375,6 +382,7 @@ def build_app(args: argparse.Namespace) -> LLMASM:
             llm_query_rewrite=args.llm_query_rewrite,
             llm_dialogue_classifier=args.llm_dialogue_classifier,
             chat_qa_truncate_chars=args.qa_truncate_chars,
+            context_sufficiency_threshold_tokens=args.context_sufficiency_threshold_tokens,
             chat_embeddings_enabled=args.chat_embeddings,
             chunking_enabled=args.chunking,
             chunking_trigger_tokens=args.chunking_trigger_tokens,

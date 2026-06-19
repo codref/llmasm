@@ -14,6 +14,7 @@ from llmasm.ids import new_id
 from llmasm.conversation.chat import chat_turn
 from llmasm.conversation.ingestion import maybe_ingest_long_source
 from llmasm.conversation.memory import store_source_summary
+from llmasm.conversation.retrieval import prepare_search_query
 from llmasm.providers.base import LLMProvider
 from llmasm.runtime.executor import Executor
 from llmasm.schemas import FinalAnswer, Summary
@@ -64,7 +65,7 @@ class LLMASM:
         )
         return compiler.compile_into_workspace(workspace_id, prompt)
 
-    def run(self, task_graph_id: str) -> str:
+    def run(self, task_graph_id: str, metadata: dict[str, Any] | None = None) -> str:
         """Create and execute a run for a task graph."""
 
         graph = self.storage.load_task_graph(task_graph_id)
@@ -73,6 +74,8 @@ class LLMASM:
             workspace_graph_id=graph.workspace_graph_id,
             task_graph_id=task_graph_id,
         )
+        if metadata:
+            run.metadata.update(metadata)
         self.storage.create_run(run)
         executor = Executor(
             storage=self.storage,
@@ -109,8 +112,19 @@ class LLMASM:
             runtime_config=self.runtime_config,
             embedding_store=self.embedding_store,
         )
+
+        # Prepare the embedding-search query once per turn (rewrite if enabled).
+        # This is used by the runtime context selector, not the compiler/planner.
+        search_query = prepare_search_query(
+            prompt,
+            workspace_id,
+            storage=self.storage,
+            provider=self.provider,
+            runtime_config=self.runtime_config,
+        )
+
         task_graph_id = self.compile(workspace_id, ingestion.effective_prompt)
-        run_id = self.run(task_graph_id)
+        run_id = self.run(task_graph_id, metadata={"search_query": search_query})
         graph = self.storage.load_task_graph(task_graph_id)
         final_node_ids = {node.id for node in graph.nodes if node.kind == "final"}
         artifacts = [
@@ -127,6 +141,7 @@ class LLMASM:
             out_info["run_id"] = run_id
             out_info["task_graph_id"] = task_graph_id
             out_info["chunked_source"] = ingestion.source_id is not None
+            out_info["search_query"] = search_query
 
         if not artifacts:
             return FinalAnswer(text="", sources=[])

@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from llmasm.config import RuntimeConfig
+from llmasm.conversation.memory import get_recent_qa_pairs
 from llmasm.graph.models import MemoryItem
 from llmasm.providers.base import LLMProvider
 from llmasm.storage.base import Storage
@@ -145,6 +146,25 @@ def _default_preparer(runtime_config: RuntimeConfig) -> QueryPreparer:
     return PassthroughPreparer()
 
 
+def prepare_search_query(
+    prompt: str,
+    workspace_graph_id: str,
+    *,
+    storage: Storage,
+    provider: LLMProvider,
+    runtime_config: RuntimeConfig,
+) -> str:
+    """Return an embedding-search-ready query, applying LLM rewrite if enabled."""
+    preparer = _default_preparer(runtime_config)
+    recent_qa_pairs = get_recent_qa_pairs(storage, workspace_graph_id, limit=3)
+    return preparer.prepare(
+        prompt,
+        recent_qa_pairs,
+        provider,
+        runtime_config.default_model,
+    )
+
+
 def _is_summary_item(item: MemoryItem) -> bool:
     """Return True when a source_passage item is a document summary."""
     return bool(item.metadata.get("is_summary", False))
@@ -170,9 +190,6 @@ def retrieve_context(
     """
     embedding_store = embedding_store or NullEmbeddingStore()
     prep = preparer or _default_preparer(runtime_config)
-
-    # Gather recent Q/A pairs for rewrite
-    from llmasm.conversation.memory import get_recent_qa_pairs
 
     recent_qa_pairs = get_recent_qa_pairs(storage, workspace_graph_id, limit=3)
 

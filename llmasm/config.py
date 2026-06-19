@@ -36,6 +36,11 @@ class RuntimeConfig:
     llm_query_rewrite: bool = False
     llm_dialogue_classifier: bool = False
 
+    # Runtime context selection (planner / non-fast-path)
+    runtime_context_memory_kinds: list[str] | None = None
+    context_sufficiency_threshold_tokens: int = 0
+    prefer_run_context: bool = True
+
     # Document chunking for long source passages
     chunking_enabled: bool = True
     chunking_trigger_tokens: int = 512

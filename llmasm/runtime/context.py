@@ -9,6 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
 from llmasm.config import RuntimeConfig
+from llmasm.conversation.retrieval import prepare_search_query
 from llmasm.graph.models import MemoryItem, Node, Run
 from llmasm.providers.base import LLMProvider
 from llmasm.storage.base import ContextItem, Storage
@@ -20,6 +21,11 @@ log = logging.getLogger(__name__)
 
 _MAX_SNIPPET_CHARS = 200
 _MAX_CANDIDATES_FOR_LLM = 12
+
+# Memory kinds allowed in runtime context by default.
+# user_question / assistant_answer are excluded to avoid the model re-answering
+# prior turns. A node can opt-in via metadata["context_memory_kinds"].
+DEFAULT_RUNTIME_CONTEXT_KINDS = {"source_passage", "human_note", "system_note"}
 
 
 class ContextRelevanceFilter(BaseModel):
@@ -77,6 +83,26 @@ class SelectedContext:
 
     items: list[ContextItem]
     direct_inputs: dict[str, BaseModel]
+    search_query: str = ""
+
+
+def _allowed_memory_kinds(node: Node, runtime_config: RuntimeConfig) -> set[str]:
+    """Return the memory kinds that may be retrieved for this node."""
+    node_kinds = node.metadata.get("context_memory_kinds")
+    if node_kinds:
+        return set(node_kinds)
+    config_kinds = runtime_config.runtime_context_memory_kinds
+    if config_kinds is not None:
+        return set(config_kinds)
+    return DEFAULT_RUNTIME_CONTEXT_KINDS
+
+
+def _direct_input_tokens(direct_inputs: dict[str, BaseModel], tokenizer) -> int:
+    total = 0
+    for value in direct_inputs.values():
+        text = json.dumps(value.model_dump(mode="json"), sort_keys=True)
+        total += max(1, tokenizer.count_tokens(text))
+    return total
 
 
 def _match_to_context_item(match: ScoredMatch, tokenizer) -> ContextItem:
@@ -113,23 +139,46 @@ def select_context(
         ]
     )
     budget = int(node.metadata.get("max_input_tokens") or runtime_config.default_context_tokens)
+    allowed_kinds = _allowed_memory_kinds(node, runtime_config)
+
+    # ── Short-circuit: if direct inputs are already rich enough, skip workspace retrieval ──
+    direct_tokens = _direct_input_tokens(direct_inputs, runtime_config.tokenizer)
+    sufficiency_threshold = runtime_config.context_sufficiency_threshold_tokens
+    if runtime_config.prefer_run_context and sufficiency_threshold > 0 and direct_tokens >= sufficiency_threshold:
+        return SelectedContext(items=[], direct_inputs=direct_inputs, search_query="")
+
+    # Prefer a search query computed once for this run (e.g. by LLMASM.ask).
+    # Fall back to computing it here for callers that invoke the executor directly.
+    search_query = run.metadata.get("search_query") or prepare_search_query(
+        query,
+        run.workspace_graph_id,
+        storage=storage,
+        provider=provider,
+        runtime_config=runtime_config,
+    )
 
     # ── Vector-similarity items (when embeddings are enabled) ──────────────
     workspace_ids = [run.workspace_graph_id, *runtime_config.reference_workspace_ids]
     vector_items: list[ContextItem] = []
     if runtime_config.embeddings_enabled:
-        output = provider.embed([query], {"model": runtime_config.embedding_model})[0]
+        output = provider.embed([search_query], {"model": runtime_config.embedding_model})[0]
         vector_matches = embedding_store.search_similar(
             output.vector,
             {"owner_type": "memory_item", "workspace_graph_ids": workspace_ids},
             limit=20,
         )
-        vector_items = [_match_to_context_item(m, runtime_config.tokenizer) for m in vector_matches]
+        vector_items = [
+            _match_to_context_item(m, runtime_config.tokenizer)
+            for m in vector_matches
+            if isinstance(m.item, MemoryItem) and m.item.kind in allowed_kinds
+        ]
 
     # ── Word-overlap items ─────────────────────────────────────────────────
     text_items: list[ContextItem] = []
     if hasattr(storage, "retrieve_workspace_context"):
-        text_items = storage.retrieve_workspace_context(workspace_ids, query, budget, {})
+        text_items = storage.retrieve_workspace_context(
+            workspace_ids, search_query, budget, {}, kinds=allowed_kinds
+        )
 
     # ── Merge: deduplicate by item id, keep highest score ─────────────────
     by_id: dict[str, ContextItem] = {}
@@ -160,13 +209,13 @@ def select_context(
     # ── LLM relevance filter (opt-in) ──────────────────────────────────────
     if runtime_config.llm_context_filter and ranked:
         ranked = filter_context_with_llm(
-            query,
+            search_query,
             ranked,
             provider,
             {"model": runtime_config.default_model},
         )
 
-    return SelectedContext(items=_trim(ranked, budget), direct_inputs=direct_inputs)
+    return SelectedContext(items=_trim(ranked, budget), direct_inputs=direct_inputs, search_query=search_query)
 
 
 def _is_source_summary(item: ContextItem) -> bool:
