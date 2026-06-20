@@ -35,7 +35,8 @@ class FakeProvider:
         self.generate_prompts.append(prompt)
         if format_schema is not None and self.planner_outputs:
             return ModelOutput(text=self.planner_outputs.pop(0), token_usage={"input_tokens": 1, "output_tokens": 1})
-        return ModelOutput(text=self.model_text, token_usage={"input_tokens": 5, "output_tokens": 2})
+        text = self.model_text(prompt) if callable(self.model_text) else self.model_text
+        return ModelOutput(text=text, token_usage={"input_tokens": 5, "output_tokens": 2})
 
     def embed(self, texts: list[str], options: dict[str, Any] | None = None) -> list[EmbeddingOutput]:
         self.embed_calls += len(texts)

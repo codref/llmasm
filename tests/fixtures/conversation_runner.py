@@ -155,7 +155,6 @@ def run_fixture(
     storage = app.storage
     results: list[TurnResult] = []
     previous_task_graph_id: str | None = None
-    previous_final_node_id: str | None = None
 
     for i, turn_spec in enumerate(fixture.turns):
         # Step 1: inject context before compilation
@@ -222,7 +221,6 @@ def run_fixture(
             )
 
         previous_task_graph_id = task_graph_id
-        previous_final_node_id = final_id
 
         # Step 6: keyword assertions
         answer_lower = answer.text.lower()

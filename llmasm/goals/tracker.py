@@ -46,6 +46,16 @@ class GoalTracker:
         self.storage.update_goal(goal)
         return goal
 
+    def continue_goal(self, goal_id: str, goal_update_text: str) -> Goal:
+        """Append a continue-turn prompt to the active goal so the goal text stays current."""
+
+        goal = self.storage.load_goal(goal_id)
+        update = goal_update_text or goal.text
+        goal.text = f"{goal.text}\nUser: {update}"
+        goal.status = "active"
+        self.storage.update_goal(goal)
+        return goal
+
     def close_goal(self, goal_id: str, reason: str) -> Goal:
         """Close a goal."""
 

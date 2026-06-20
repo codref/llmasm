@@ -552,7 +552,7 @@ Goal actions:
 Classification heuristic (evaluated in order):
 
 ```text
-function classify_goal_action(prompt, active_goal):
+function classify_goal_action(prompt, active_goal, storage, workspace_graph_id, context_depth):
     if active_goal is null:
         return "new"
 
@@ -586,15 +586,17 @@ function classify_goal_action(prompt, active_goal):
     if any(signal in normalized for signal in REFERENCE_SIGNALS):
         return "continue"
 
-    # Fallback: word-overlap ratio with active goal text.
-    overlap = word_overlap_ratio(prompt, active_goal.text)
-    if overlap >= 0.25:
+    # Fallback: word-overlap ratio against the active goal text + recent workspace history.
+    recent_context = retrieve_recent_memory_items(storage, workspace_graph_id, context_depth)
+    combined_text = active_goal.text + "\n" + recent_context
+    overlap = word_overlap_ratio(prompt, combined_text)
+    if overlap >= 0.12:
         return "continue"
 
     return "new"
 ```
 
-When the action is `steer`, the compiler records a `goal_update` event after the proposal is accepted and updates the active goal text from `goal_update_text`. When the action is `new`, the compiler creates a provisional `Goal` from the user prompt before planning, then replaces its text with `goal_update_text` after the proposal is accepted. The prior goal is not closed unless the prompt explicitly signals abandonment via a `NEW_SIGNALS` keyword.
+When the action is `steer`, the compiler records a `goal_update` event after the proposal is accepted and updates the active goal text from `goal_update_text`. When the action is `new`, the compiler creates a provisional `Goal` from the user prompt before planning, then replaces its text with `goal_update_text` after the proposal is accepted. When the action is `continue`, the compiler appends the user prompt to the active goal text so the goal stays current for future classifications. The prior goal is not closed unless the prompt explicitly signals abandonment via a `NEW_SIGNALS` keyword.
 
 ### 7.4 Planner Prompt Construction
 
@@ -828,9 +830,21 @@ function compile_with_repair(planner_prompt, expected_goal_action, max_attempts)
 function compile_into_workspace(workspace_graph_id, prompt, runtime_config):
     workspace = store.load_workspace_graph(workspace_graph_id)
 
-    # Step 1: classify goal action without an LLM call
+    # Step 1: classify goal action (heuristic or LLM-backed)
     active_goal = goal_tracker.load_active_goal(workspace_graph_id)
-    goal_action = classify_goal_action(prompt, active_goal)
+    if runtime_config.llm_goal_classifier:
+        goal_action = classify_goal_action_llm(
+            prompt, active_goal, planner,
+            storage=storage, workspace_graph_id=workspace_graph_id,
+            context_depth=runtime_config.classifier_context_depth,
+            max_goal_chars=runtime_config.classifier_goal_text_chars
+        )
+    else:
+        goal_action = classify_goal_action(
+            prompt, active_goal,
+            storage=storage, workspace_graph_id=workspace_graph_id,
+            context_depth=runtime_config.classifier_context_depth
+        )
 
     if goal_action == "new":
         active_goal = goal_tracker.create_provisional_goal(workspace_graph_id, prompt)
@@ -877,13 +891,15 @@ function compile_into_workspace(workspace_graph_id, prompt, runtime_config):
         max_attempts = runtime_config.compiler_max_attempts
     )
 
-    # Step 6: normalize and update goal if steering
+    # Step 6: normalize and update goal
     task_graph = normalize(proposal)
 
     if proposal.goal_action == "steer":
         goal_tracker.steer_goal(active_goal.id, proposal.goal_update_text)
-    if proposal.goal_action == "new":
+    elif proposal.goal_action == "new":
         goal_tracker.finalize_goal(active_goal.id, proposal.goal_update_text)
+    elif proposal.goal_action == "continue":
+        goal_tracker.continue_goal(active_goal.id, proposal.goal_update_text or prompt)
 
     # Step 7: persist before execution
     task_graph_id = store.persist_task_graph(workspace.id, task_graph)

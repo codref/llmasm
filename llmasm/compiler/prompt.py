@@ -42,6 +42,8 @@ def render_planner_prompt(
     required = [
         "You are the LLMASM planner. Emit one TaskGraphProposal JSON object and no prose.",
         "Planning rules:\n"
+        "- MANDATORY: Every task graph MUST contain exactly one node with kind=\"final\". No exceptions.\n"
+        "- Allowed node kinds: intent, tool, model, compress, router, expand, final. Do NOT use goal, memory_query, or observation.\n"
         "- Always echo the exact active goal_action value.\n"
         "- The intent node is always the root: it has no incoming edges and no input_schema.\n"
         "- For retrieval QA tasks, prefer a simple DAG: intent -> retrieval tool -> model -> final.\n"
@@ -52,8 +54,10 @@ def render_planner_prompt(
         "- Tool, model, and final nodes must each have at least one incoming edge.\n"
         "- Model nodes should use output_schema Summary unless the tool output already is FinalAnswer.\n"
         "- QA model nodes should set metadata.instruction or metadata.description to the answer instruction.\n"
-        "- Final nodes should use input_schema Summary and output_schema FinalAnswer.\n"
+        "- When the user prompt is the exact placeholder '[A long source document has been stored in workspace chunks. Ask questions about it.]', include a model node named 'summarize_source' early in the graph. It should use input_schema RawText, output_schema Summary, and metadata.is_summary_node=true. Its instruction should ask for a concise summary of the stored source. Connect it to a downstream model node that answers the implicit question, then to the final node.\n"
+        "- Final nodes MUST use input_schema Summary and output_schema FinalAnswer; connect the last model node's output to the final node's input.\n"
         "- Use edge ports named output and input unless a node declares explicit ports.\n"
+        "- Port direction must be exactly 'input' or 'output' (not 'in'/'out').\n"
         "- Use a router node when:\n"
         "  (a) a tool might return NotFound and the two paths need different handling, OR\n"
         "  (b) the user explicitly asks to classify input and branch to different answer styles or outputs.\n"

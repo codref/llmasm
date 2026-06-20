@@ -13,7 +13,8 @@ pipeline.
 
 | Step | Code | What it does |
 |------|------|-------------|
-| Classify goal | `classify_goal_action(prompt, active_goal)` | NEW / CONTINUE / STEER |
+| Classify goal | `classify_goal_action(prompt, active_goal, storage, workspace_id, context_depth)` | NEW / CONTINUE / STEER |
+| Classify goal (LLM) | `classify_goal_action_llm(..., storage, workspace_id, context_depth)` | NEW / CONTINUE / STEER |
 | Prior context | `_prior_context(workspace_id, prompt)` | retrieves MemoryItems |
 | Planner prompt | `render_planner_prompt(...)` | planner sees goal + context |
 | Planner decides | `compile_with_repair(...)` | simple `intent→model→final` vs tool-loop vs expand DAG |

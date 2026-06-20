@@ -25,9 +25,26 @@ from llmasm.graph.models import (
 from llmasm.storage.base import ContextItem, FewShotExample
 
 
+_STOP_WORDS = frozenset(
+    "a an the is are was were be been being have has had do does did will would could should "
+    "may might shall can of in on at to for with by from into through about over after before "
+    "and or but not no nor so yet both either neither as if that than then there this these "
+    "those it its it's what which who whom when where how i you he she we they me him her us "
+    "them my your his her our their mine yours his hers ours theirs what's that's here out up "
+    "just also more very much such s t re ve ll d m".split()
+)
+
+
+def _meaningful_words(text: str) -> frozenset[str]:
+    return frozenset(
+        word.strip(".,!?;:'\"") for word in text.lower().split()
+        if word.strip(".,!?;:'\"") and word.strip(".,!?;:'\"") not in _STOP_WORDS and len(word) > 1
+    )
+
+
 def _word_overlap_score(query: str, text: str) -> float:
-    q = {word for word in query.lower().split() if word}
-    t = {word for word in text.lower().split() if word}
+    q = _meaningful_words(query)
+    t = _meaningful_words(text)
     if not q or not t:
         return 0.0
     return len(q & t) / len(q)
@@ -235,9 +252,12 @@ class InMemoryStorage:
         query: str,
         filters: dict[str, Any] | None = None,
         limit: int = 20,
+        kinds: set[str] | None = None,
     ) -> list[MemoryItem]:
         filters = filters or {}
         items = self.list_memory_items(workspace_graph_id)
+        if kinds is not None:
+            items = [item for item in items if item.kind in kinds]
         for key, value in filters.items():
             if value is None:
                 continue
@@ -250,15 +270,19 @@ class InMemoryStorage:
         query: str,
         budget_tokens: int,
         filters: dict[str, Any] | None = None,
+        kinds: set[str] | None = None,
     ) -> list[ContextItem]:
         ids = [workspace_graph_id] if isinstance(workspace_graph_id, str) else workspace_graph_id
         all_items: list[MemoryItem] = []
         for ws_id in ids:
-            all_items.extend(self.search_memory(ws_id, query, filters, limit=50))
+            all_items.extend(self.search_memory(ws_id, query, filters, limit=50, kinds=kinds))
         ranked = sorted(all_items, key=lambda item: _word_overlap_score(query, item.text), reverse=True)
         total = 0
         context: list[ContextItem] = []
         for item in ranked:
+            score = _word_overlap_score(query, item.text)
+            if score <= 0.0:
+                continue
             tokens = max(1, len(item.text.split()))
             if total + tokens > budget_tokens:
                 continue
@@ -268,7 +292,7 @@ class InMemoryStorage:
                     id=item.id,
                     kind="memory_item",
                     text=item.text,
-                    score=_word_overlap_score(query, item.text),
+                    score=score,
                     token_count=tokens,
                     item=item,
                 )

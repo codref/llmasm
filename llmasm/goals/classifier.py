@@ -1,8 +1,112 @@
-"""Deterministic goal classification."""
+"""Goal classification — deterministic heuristic and LLM-backed paths."""
 
 from __future__ import annotations
 
+import json
+import logging
+from typing import TYPE_CHECKING, Any
+
+from pydantic import BaseModel, ValidationError
+
 from llmasm.graph.models import Goal, GoalAction
+
+if TYPE_CHECKING:
+    from llmasm.providers.base import LLMProvider
+    from llmasm.storage.base import Storage
+
+log = logging.getLogger(__name__)
+
+_MAX_CONTEXT_CHARS = 800
+
+
+class GoalClassification(BaseModel):
+    """Structured output model for LLM-backed goal classification."""
+
+    action: GoalAction
+    reason: str
+
+
+def _recent_context_text(
+    storage: Storage | None, workspace_graph_id: str | None, depth: int
+) -> str:
+    """Retrieve recent memory items from storage and return a compact text block."""
+
+    if storage is None or workspace_graph_id is None or depth <= 0:
+        return ""
+    try:
+        items = storage.list_memory_items(workspace_graph_id)
+    except Exception:
+        return ""
+    # Prefer turn-like items; sort by creation time, newest last
+    turns = [item for item in items if item.kind in {"turn", "human_note", "fact"}]
+    turns.sort(key=lambda x: x.created_at)
+    recent = turns[-depth:]
+    if not recent:
+        return ""
+    lines = []
+    for item in recent:
+        snippet = item.text[:200].replace("\n", " ")
+        lines.append(f"- [{item.kind}] {snippet}")
+    return "\n".join(lines)
+
+
+def _classification_prompt(
+    prompt: str, active_goal: Goal, recent_context: str = "", max_goal_chars: int = 400
+) -> str:
+    goal_text = active_goal.text[:max_goal_chars]
+    context_section = (
+        f"\nRecent conversation history:\n{recent_context[:_MAX_CONTEXT_CHARS]}\n"
+        if recent_context
+        else ""
+    )
+    return (
+        "You are a goal-classification assistant. "
+        "Classify the USER PROMPT relative to the ACTIVE GOAL and return JSON.\n\n"
+        "Actions:\n"
+        '  "new"      – the prompt starts an unrelated new goal.\n'
+        '  "continue" – the prompt continues, deepens, or asks a follow-up about the current goal.\n'
+        '  "steer"    – the prompt redirects or corrects the current goal.\n\n'
+        "Classify regardless of the language of the prompts.\n\n"
+        f"ACTIVE GOAL:\n{goal_text}\n"
+        f"{context_section}\n"
+        f"USER PROMPT:\n{prompt}\n\n"
+        'Return ONLY valid JSON matching the schema: {"action": "<new|continue|steer>", "reason": "<one sentence>"}'
+    )
+
+
+def classify_goal_action_llm(
+    prompt: str,
+    active_goal: Goal | None,
+    planner: LLMProvider,
+    options: dict[str, Any] | None = None,
+    storage: Storage | None = None,
+    workspace_graph_id: str | None = None,
+    context_depth: int = 3,
+    max_goal_chars: int = 400,
+) -> GoalAction:
+    """Classify using an LLM call; fall back to the deterministic classifier on any error."""
+
+    if active_goal is None:
+        return GoalAction.NEW
+    recent_context = _recent_context_text(storage, workspace_graph_id, context_depth)
+    try:
+        output = planner.generate(
+            _classification_prompt(prompt, active_goal, recent_context, max_goal_chars),
+            options or {},
+            GoalClassification.model_json_schema(),
+        )
+        raw = str(getattr(output, "text", output)).strip()
+        classification = GoalClassification.model_validate_json(raw)
+        return classification.action
+    except (json.JSONDecodeError, ValidationError, Exception) as exc:
+        log.debug("LLM goal classifier failed (%s); falling back to heuristic.", exc)
+        return classify_goal_action(
+            prompt,
+            active_goal,
+            storage=storage,
+            workspace_graph_id=workspace_graph_id,
+            context_depth=context_depth,
+        )
 
 NEW_SIGNALS = [
     "new task",
@@ -37,6 +141,24 @@ CONTINUE_SIGNALS = [
     "can you also",
     "additionally",
     "on top of that",
+    "in more detail",
+    "more about",
+    "tell me more",
+    "explain more",
+    "can you explain",
+    "can you elaborate",
+    "elaborate on",
+    "going back",
+    "related to",
+    "in that context",
+    "on that topic",
+    "regarding",
+    "what is the",
+    "what are the",
+    "how does",
+    "how do",
+    "why is",
+    "why does",
 ]
 REFERENCE_SIGNALS = [
     "it",
@@ -51,7 +173,13 @@ REFERENCE_SIGNALS = [
 ]
 
 
-def classify_goal_action(prompt: str, active_goal: Goal | None) -> GoalAction:
+def classify_goal_action(
+    prompt: str,
+    active_goal: Goal | None,
+    storage: Storage | None = None,
+    workspace_graph_id: str | None = None,
+    context_depth: int = 3,
+) -> GoalAction:
     """Classify the prompt against the active goal using the RFC heuristic."""
 
     if active_goal is None:
@@ -65,7 +193,10 @@ def classify_goal_action(prompt: str, active_goal: Goal | None) -> GoalAction:
         return GoalAction.CONTINUE
     if any(signal in normalized for signal in REFERENCE_SIGNALS):
         return GoalAction.CONTINUE
-    if word_overlap_ratio(prompt, active_goal.text) >= 0.25:
+    # Compare against both the active goal text and recent workspace history
+    recent_context = _recent_context_text(storage, workspace_graph_id, context_depth)
+    combined_text = f"{active_goal.text}\n{recent_context}"
+    if word_overlap_ratio(prompt, combined_text) >= 0.12:
         return GoalAction.CONTINUE
     return GoalAction.NEW
 

@@ -74,7 +74,7 @@ def _extract_text(value: BaseModel, _: dict[str, Any] | None = None) -> Conversa
 
 
 def _to_json_string(value: BaseModel, _: dict[str, Any] | None = None) -> RawText:
-    return RawText(text=json.dumps(value.model_dump(), sort_keys=True))
+    return RawText(text=json.dumps(value.model_dump(mode="json"), sort_keys=True))
 
 
 def _select_field(value: BaseModel, metadata: dict[str, Any] | None = None) -> RawText:

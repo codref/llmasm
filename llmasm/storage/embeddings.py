@@ -116,7 +116,7 @@ def embed_and_persist(
 ) -> EmbeddingRef | None:
     """Embed text when enabled and persist the reference plus vector."""
 
-    if not runtime_config.embeddings_enabled:
+    if not (runtime_config.embeddings_enabled or runtime_config.chat_embeddings_enabled):
         return None
     text_hash = sha256(text.encode("utf-8")).hexdigest()
     if embedding_store.has_embedding(owner_type, owner_id, text_hash):
@@ -146,6 +146,7 @@ def write_memory_item(
     source_artifact_id: str | None = None,
     source_run_id: str | None = None,
     confidence: float = 1.0,
+    metadata: dict[str, Any] | None = None,
 ) -> MemoryItem:
     """Persist a MemoryItem and optionally embed its text.
 
@@ -161,6 +162,7 @@ def write_memory_item(
         source_artifact_id=source_artifact_id,
         source_run_id=source_run_id,
         confidence=confidence,
+        metadata=metadata or {},
     )
     storage.persist_memory_item(item)
     embed_and_persist(text, "memory_item", item.id, runtime_config, provider, embedding_store)

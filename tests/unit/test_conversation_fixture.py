@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 
 from llmasm.api import LLMASM
 from llmasm.config import RuntimeConfig
@@ -79,7 +78,8 @@ def test_fixture_round_trips_json(tmp_path: Path) -> None:
 def test_fixture_from_json_defaults() -> None:
     """TurnSpec fields have sane defaults when absent from JSON."""
     raw = json.dumps({"name": "x", "turns": [{"prompt": "ask"}]})
-    import tempfile, os
+    import tempfile
+    import os
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         f.write(raw)
         name = f.name

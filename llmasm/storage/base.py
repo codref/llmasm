@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from llmasm.graph.models import (
     Artifact,
@@ -83,3 +83,19 @@ class Storage(Protocol):
         self, node_execution_key: str, input_artifact_ids: list[str]
     ) -> Artifact | None: ...
     def persist_compilation_failure(self, workspace_graph_id: str, payload: dict[str, object]) -> None: ...
+    def search_memory(
+        self,
+        workspace_graph_id: str,
+        query: str,
+        filters: dict[str, Any] | None = None,
+        limit: int = 20,
+        kinds: set[str] | None = None,
+    ) -> list[MemoryItem]: ...
+    def retrieve_workspace_context(
+        self,
+        workspace_graph_id: str | list[str],
+        query: str,
+        budget_tokens: int,
+        filters: dict[str, Any] | None = None,
+        kinds: set[str] | None = None,
+    ) -> list[ContextItem]: ...
