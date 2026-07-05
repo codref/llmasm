@@ -44,7 +44,7 @@ from llmasm.tools.file_reader import FileReaderTool
 from llmasm.tools.registry import ToolRegistry
 from llmasm.tools.weather import WeatherTool
 from llmasm.tools.wikipedia import WikipediaTool
-from llmasm.storage.embeddings import InMemoryEmbeddingStore, NullEmbeddingStore, write_memory_item
+from llmasm.storage.embeddings import InMemoryEmbeddingStore, NullEmbeddingStore
 from llmasm.storage.memory import InMemoryStorage
 from llmasm.storage.postgres import PostgresEmbeddingStore, PostgresStorage
 from llmasm.tools.reset_embeddings import reset_embeddings
@@ -636,6 +636,7 @@ def main() -> None:
                 "  /inspect         — show workspace memory items and edge count\n"
                 "  /graph           — show the task graph from the last turn\n"
                 "  /run             — show node states from the last run\n"
+                "  /tools           — list registered tools\n"
                 "  /export          — export all turns to the default output file (requires --output-file)\n"
                 "  /export <path>   — export all turns to the specified JSONL file\n"
                 "  /inject <text>   — add a context note before the next turn\n"
@@ -670,6 +671,16 @@ def main() -> None:
                     f"  {edge.edge_type:<16} {edge.from_id[:16]}... → {edge.to_id[:16]}...",
                     style="dim",
                 )
+            continue
+
+        if text == "/tools":
+            tool_lines = app.tool_registry.describe().splitlines()
+            if tool_lines:
+                console.print("Registered tools:")
+                for line in tool_lines:
+                    console.print(f"  {line}", style="dim")
+            else:
+                console.print("[dim]No tools registered.[/dim]")
             continue
 
         if text == "/graph":

@@ -41,6 +41,9 @@ class RuntimeConfig:
     context_sufficiency_threshold_tokens: int = 0
     prefer_run_context: bool = True
 
+    # Tool-use loop limits
+    max_tool_rounds: int = 5
+
     # Document chunking for long source passages
     chunking_enabled: bool = True
     chunking_trigger_tokens: int = 512

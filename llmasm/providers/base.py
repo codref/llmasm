@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import ceil
 from typing import Any, Protocol
 
@@ -18,12 +18,21 @@ class ModelInfo:
 
 
 @dataclass(frozen=True)
+class ToolCallOutput:
+    """A single tool call emitted by a model."""
+
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class ModelOutput:
     """Text generation output."""
 
     text: str
     raw: dict[str, Any] | None = None
     token_usage: dict[str, int] | None = None
+    tool_calls: list[ToolCallOutput] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -63,6 +72,8 @@ class LLMProvider(Protocol):
         prompt: str,
         options: dict[str, Any] | None = None,
         format_schema: dict[str, Any] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        messages: list[dict[str, Any]] | None = None,
     ) -> ModelOutput:
         """Generate text."""
 

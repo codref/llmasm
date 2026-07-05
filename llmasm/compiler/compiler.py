@@ -371,7 +371,7 @@ class Compiler:
             return None
         if any(c in value for c in "/[]{}()"):
             return None
-        return value
+        return str(value)
 
     def _canonical_node_fields(
         self, proposed: ProposalNode
@@ -426,8 +426,6 @@ class Compiler:
         ]
         if len(matches) == 1:
             return matches[0]
-        if len(tool_names) == 1:
-            return tool_names[0]
         return None
 
     def _normalized_tool_alias(self, value: str) -> str:

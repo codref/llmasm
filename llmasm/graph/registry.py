@@ -58,6 +58,9 @@ def default_schema_registry() -> SchemaRegistry:
         schemas.JsonValue,
         schemas.NotFound,
         schemas.RoutingDecision,
+        schemas.ToolCallRequest,
+        schemas.ToolCallResult,
+        schemas.ToolDefinition,
     ):
         registry.register(model.__name__, model)
     return registry

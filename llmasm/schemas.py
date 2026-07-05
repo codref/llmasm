@@ -74,3 +74,26 @@ class RoutingDecision(BaseModel):
 
     selected_branch: str
     reason: str | None = None
+
+
+class ToolCallRequest(BaseModel):
+    """A single tool call requested by a model."""
+
+    name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolCallResult(BaseModel):
+    """The result of invoking a tool requested by a model."""
+
+    name: str
+    content_json: dict[str, Any] | list[Any] | str | int | float | bool | None = None
+    error: str | None = None
+
+
+class ToolDefinition(BaseModel):
+    """JSON Schema definition for a tool exposed to a model."""
+
+    name: str
+    description: str
+    parameters: dict[str, Any] = Field(default_factory=dict)

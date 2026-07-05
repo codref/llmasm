@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 from pydantic import BaseModel
 
-from llmasm.schemas import WeatherObservation, WeatherQuery
+from llmasm.schemas import WeatherObservation
 from llmasm.tools.base import ToolSpec
 
 _GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
@@ -20,16 +20,12 @@ class WeatherTool:
         return ToolSpec(
             name="weather.lookup",
             description="Get current weather conditions for a location (city name).",
-            input_schema="WeatherQuery",
+            input_schema="RawText",
             output_schema="WeatherObservation",
         )
 
     def invoke(self, input: BaseModel) -> BaseModel:
-        if not isinstance(input, WeatherQuery):
-            return WeatherObservation(
-                condition=f"Unexpected input type: {type(input).__name__}",
-            )
-        location = (input.location or "").strip()
+        location = getattr(input, "text", str(input)).strip()
         if not location:
             return WeatherObservation(condition="No location provided.")
         try:

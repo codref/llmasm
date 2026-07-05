@@ -28,11 +28,11 @@ from llmasm.graph.models import (
 from llmasm.graph.registry import SchemaRegistry
 from llmasm.graph.transforms import TransformRegistry
 from llmasm.ids import new_id
-from llmasm.providers.base import LLMProvider
+from llmasm.providers.base import LLMProvider, ModelOutput
 from llmasm.runtime.context import select_context
 from llmasm.runtime.expansion import ExpansionRequest, apply_expansion
 from llmasm.runtime.scheduler import Scheduler
-from llmasm.schemas import FinalAnswer, NotFound, RawText, RoutingDecision, Summary
+from llmasm.schemas import FinalAnswer, NotFound, RawText, RoutingDecision, Summary, ToolCallRequest, ToolCallResult
 from llmasm.storage.base import ContextItem, Storage
 from llmasm.storage.embeddings import EmbeddingStore, NullEmbeddingStore, embed_and_persist
 from llmasm.tools.registry import ToolRegistry
@@ -193,50 +193,8 @@ class Executor:
             )
             return output
         if node.kind in {NodeKind.MODEL, NodeKind.COMPRESS}:
-            selected = select_context(
-                storage=self.storage,
-                runtime_config=self.runtime_config,
-                run=run,
-                node=node,
-                direct_inputs=direct_inputs,
-                embedding_store=self.embedding_store,
-                provider=self.provider,
-            )
-            prompt = self._render_node_prompt(node, selected.direct_inputs, selected.items)
-            prompt_artifact = Artifact(
-                id=new_id("artifact"),
-                run_id=run.id,
-                node_id=node.id,
-                port="prompt",
-                content_json={"text": prompt},
-                token_count=self.runtime_config.tokenizer.count_tokens(prompt),
-            )
-            self.storage.persist_artifact(prompt_artifact)
-            result = self.provider.generate(
-                prompt,
-                {"model": node.execution.get("model") or self.runtime_config.default_model},
-                None,
-            )
-            output = self._coerce_model_output(node.output_schema, result.text)
-            self.storage.persist_model_call(
-                ModelCall(
-                    id=f"modelcall_{uuid4().hex}",
-                    run_id=run.id,
-                    node_id=node.id,
-                    provider=getattr(self.provider, "name", "provider"),
-                    model=str(node.execution.get("model") or self.runtime_config.default_model),
-                    prompt_artifact_id=prompt_artifact.id,
-                    status="succeeded",
-                    token_json=result.token_usage or {},
-                )
-            )
-            # Stash the embedding search query on the node state so callers can
-            # inspect what was actually embedded (e.g. after LLM rewrite).
-            if selected.search_query:
-                state = self._state(run.id, node.id)
-                state.metadata["search_query"] = selected.search_query
-                self.storage.update_run_node_state(state)
-            return output
+            return self._invoke_model_node(run, node, direct_inputs)
+
         if node.kind == NodeKind.FINAL:
             input_value = next(iter(direct_inputs.values()), RawText(text=""))
             if isinstance(input_value, FinalAnswer):
@@ -263,6 +221,213 @@ class Executor:
         if node.kind in {NodeKind.MEMORY_QUERY, NodeKind.GOAL, NodeKind.OBSERVATION}:
             raise ExecutionError(f"Unsupported node kind in v0: {node.kind.value}")
         raise ExecutionError(f"Unsupported node kind in v0: {node.kind.value}")
+
+    def _invoke_model_node(self, run: Run, node: Node, direct_inputs: dict[str, BaseModel]) -> BaseModel:
+        """Execute a model or compress node, optionally with tool use."""
+
+        selected = select_context(
+            storage=self.storage,
+            runtime_config=self.runtime_config,
+            run=run,
+            node=node,
+            direct_inputs=direct_inputs,
+            embedding_store=self.embedding_store,
+            provider=self.provider,
+        )
+        prompt = self._render_node_prompt(node, selected.direct_inputs, selected.items)
+        prompt_artifact = Artifact(
+            id=new_id("artifact"),
+            run_id=run.id,
+            node_id=node.id,
+            port="prompt",
+            content_json={"text": prompt},
+            token_count=self.runtime_config.tokenizer.count_tokens(prompt),
+        )
+        self.storage.persist_artifact(prompt_artifact)
+        model = str(node.execution.get("model") or self.runtime_config.default_model)
+        options = {"model": model}
+
+        tools = self._node_tool_definitions(node)
+        if tools:
+            result = self._invoke_model_with_tool_loop(run, node, prompt, prompt_artifact.id, tools, options)
+        else:
+            result = self.provider.generate(prompt, options, None)
+            self.storage.persist_model_call(
+                ModelCall(
+                    id=f"modelcall_{uuid4().hex}",
+                    run_id=run.id,
+                    node_id=node.id,
+                    provider=getattr(self.provider, "name", "provider"),
+                    model=model,
+                    prompt_artifact_id=prompt_artifact.id,
+                    status="succeeded",
+                    token_json=result.token_usage or {},
+                )
+            )
+        output = self._coerce_model_output(node.output_schema, result.text)
+
+        # Stash the embedding search query on the node state so callers can
+        # inspect what was actually embedded (e.g. after LLM rewrite).
+        if selected.search_query:
+            state = self._state(run.id, node.id)
+            state.metadata["search_query"] = selected.search_query
+            self.storage.update_run_node_state(state)
+        return output
+
+    def _node_tool_definitions(self, node: Node) -> list[dict[str, Any]] | None:
+        """Return the tool definitions a model node should advertise, if any."""
+
+        tools_config = node.execution.get("tools")
+        if tools_config is None or tools_config == "none":
+            return None
+        if tools_config == "all":
+            names = self.tool_registry.names()
+        elif isinstance(tools_config, list):
+            names = list(tools_config)
+        else:
+            return None
+        return [self.tool_registry.to_json_schema(name) for name in names]
+
+    def _invoke_model_with_tool_loop(
+        self,
+        run: Run,
+        node: Node,
+        prompt: str,
+        prompt_artifact_id: str,
+        tools: list[dict[str, Any]],
+        options: dict[str, Any],
+    ) -> ModelOutput:
+        """Run a model node with a bounded tool-use loop."""
+
+        messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
+        max_rounds = self.runtime_config.max_tool_rounds
+        last_result: ModelOutput | None = None
+        last_results: list[ToolCallResult] = []
+
+        for _round in range(max_rounds):
+            result = self.provider.generate(
+                prompt,
+                options,
+                None,
+                tools=tools,
+                messages=messages,
+            )
+            last_result = result
+            self.storage.persist_model_call(
+                ModelCall(
+                    id=f"modelcall_{uuid4().hex}",
+                    run_id=run.id,
+                    node_id=node.id,
+                    provider=getattr(self.provider, "name", "provider"),
+                    model=str(options.get("model", self.runtime_config.default_model)),
+                    prompt_artifact_id=prompt_artifact_id,
+                    status="succeeded",
+                    token_json=result.token_usage or {},
+                )
+            )
+            if not result.tool_calls:
+                break
+
+            requests = [ToolCallRequest(name=tc.name, arguments=tc.arguments) for tc in result.tool_calls]
+            requests_artifact = Artifact(
+                id=new_id("artifact"),
+                run_id=run.id,
+                node_id=node.id,
+                port="tool_calls",
+                content_json=[req.model_dump(mode="json") for req in requests],
+                token_count=self.runtime_config.tokenizer.count_tokens(json.dumps(requests, sort_keys=True, default=str)),
+                metadata={"round": _round},
+            )
+            self.storage.persist_artifact(requests_artifact)
+
+            assistant_message: dict[str, Any] = {"role": "assistant", "content": result.text or ""}
+            assistant_message["tool_calls"] = [
+                {"function": {"name": req.name, "arguments": req.arguments}} for req in requests
+            ]
+            messages.append(assistant_message)
+
+            results = self._execute_tool_calls(run, node, requests)
+            last_results = results
+            results_artifact = Artifact(
+                id=new_id("artifact"),
+                run_id=run.id,
+                node_id=node.id,
+                port="tool_results",
+                content_json=[res.model_dump(mode="json") for res in results],
+                token_count=self.runtime_config.tokenizer.count_tokens(json.dumps(results, sort_keys=True, default=str)),
+                metadata={"round": _round},
+            )
+            self.storage.persist_artifact(results_artifact)
+
+            for req, res in zip(requests, results):
+                messages.append(
+                    {
+                        "role": "tool",
+                        "name": req.name,
+                        "content": json.dumps(res.model_dump(mode="json"), default=str),
+                    }
+                )
+
+        if last_result is None:
+            raise ExecutionError(f"Tool-use loop produced no result for node {node.name}")
+        # If the model never produced a final text response, surface the last tool results.
+        if last_result.tool_calls and not last_result.text:
+            final_text = json.dumps(
+                [res.model_dump(mode="json") for res in last_results],
+                sort_keys=True,
+                default=str,
+            )
+            return ModelOutput(
+                text=final_text,
+                raw=last_result.raw,
+                token_usage=last_result.token_usage,
+                tool_calls=last_result.tool_calls,
+            )
+        return last_result
+
+    def _execute_tool_calls(
+        self, run: Run, node: Node, requests: list[ToolCallRequest]
+    ) -> list[ToolCallResult]:
+        """Invoke registered tools for a list of model-requested tool calls."""
+
+        results: list[ToolCallResult] = []
+        for req in requests:
+            if not self.tool_registry.has(req.name):
+                results.append(ToolCallResult(name=req.name, error=f"Unknown tool: {req.name}"))
+                continue
+            tool = self.tool_registry.get(req.name)
+            spec = tool.spec()
+            model = self._model_for_schema(spec.input_schema)
+            try:
+                input_value = model.model_validate(req.arguments)
+            except Exception as exc:
+                results.append(ToolCallResult(name=req.name, error=f"Invalid arguments: {exc}"))
+                continue
+            start = perf_counter()
+            try:
+                output = tool.invoke(input_value)
+            except Exception as exc:
+                results.append(ToolCallResult(name=req.name, error=f"Tool error: {exc}"))
+                continue
+            elapsed = int((perf_counter() - start) * 1000)
+            output_data: Any
+            if isinstance(output, BaseModel):
+                output_data = output.model_dump(mode="json")
+            else:
+                output_data = str(output)
+            self.storage.persist_tool_call(
+                ToolCall(
+                    id=f"toolcall_{uuid4().hex}",
+                    run_id=run.id,
+                    node_id=node.id,
+                    tool_name=req.name,
+                    input_json=input_value.model_dump(mode="json"),
+                    status="succeeded",
+                    latency_ms=elapsed,
+                )
+            )
+            results.append(ToolCallResult(name=req.name, content_json=output_data))
+        return results
 
     def _invoke_router(self, run: Run, node: Node, direct_inputs: dict[str, BaseModel]) -> RoutingDecision:
         mode = node.execution.get("mode", "model")

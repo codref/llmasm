@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from llmasm.errors import ValidationError
 from llmasm.graph.registry import SchemaRegistry
 from llmasm.tools.base import Tool
@@ -13,6 +15,14 @@ class ToolRegistry:
     def __init__(self, schema_registry: SchemaRegistry) -> None:
         self._schema_registry = schema_registry
         self._tools: dict[str, Tool] = {}
+        self._register_builtin_tools()
+
+    def _register_builtin_tools(self) -> None:
+        """Register tools that ship with the registry."""
+
+        from llmasm.tools.list_tools import ToolsListTool
+
+        self.register(ToolsListTool(self))
 
     def register(self, tool: Tool) -> None:
         """Register a tool after validating schema tags."""
@@ -52,3 +62,18 @@ class ToolRegistry:
         """Return sorted registered tool names."""
 
         return sorted(self._tools)
+
+    def to_json_schema(self, name: str) -> dict[str, Any]:
+        """Return an LLM-compatible JSON Schema definition for a registered tool."""
+
+        tool = self.get(name)
+        spec = tool.spec()
+        model = self._schema_registry.get(spec.input_schema)
+        return {
+            "type": "function",
+            "function": {
+                "name": spec.name,
+                "description": spec.description,
+                "parameters": model.model_json_schema(),
+            },
+        }

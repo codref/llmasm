@@ -17,11 +17,18 @@ class FakeProvider:
 
     name = "fake"
 
-    def __init__(self, planner_outputs: list[str] | None = None, model_text: str = "summary text") -> None:
+    def __init__(
+        self,
+        planner_outputs: list[str] | None = None,
+        model_text: str = "summary text",
+        tool_outputs: list[ModelOutput] | None = None,
+    ) -> None:
         self.planner_outputs = list(planner_outputs or [])
         self.model_text = model_text
+        self.tool_outputs = list(tool_outputs or [])
         self.generate_prompts: list[str] = []
         self.embed_calls = 0
+        self.generate_calls: list[dict[str, Any]] = []
 
     def list_models(self) -> list[ModelInfo]:
         return [ModelInfo(name="fake-model", context_window=4096), ModelInfo(name="llama3.1:8b", context_window=8192)]
@@ -31,10 +38,21 @@ class FakeProvider:
         prompt: str,
         options: dict[str, Any] | None = None,
         format_schema: dict[str, Any] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        messages: list[dict[str, Any]] | None = None,
     ) -> ModelOutput:
         self.generate_prompts.append(prompt)
+        self.generate_calls.append({"tools": tools, "messages": messages})
         if format_schema is not None and self.planner_outputs:
             return ModelOutput(text=self.planner_outputs.pop(0), token_usage={"input_tokens": 1, "output_tokens": 1})
+        if tools is not None and self.tool_outputs:
+            output = self.tool_outputs.pop(0)
+            return ModelOutput(
+                text=output.text,
+                raw=output.raw,
+                token_usage=output.token_usage or {"input_tokens": 5, "output_tokens": 2},
+                tool_calls=output.tool_calls,
+            )
         text = self.model_text(prompt) if callable(self.model_text) else self.model_text
         return ModelOutput(text=text, token_usage={"input_tokens": 5, "output_tokens": 2})
 

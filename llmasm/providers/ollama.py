@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 
 from llmasm.errors import ProviderError
-from llmasm.providers.base import EmbeddingOutput, ModelInfo, ModelOutput
+from llmasm.providers.base import EmbeddingOutput, ModelInfo, ModelOutput, ToolCallOutput
 
 
 class OllamaProvider:
@@ -43,28 +43,86 @@ class OllamaProvider:
         prompt: str,
         options: dict[str, Any] | None = None,
         format_schema: dict[str, Any] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        messages: list[dict[str, Any]] | None = None,
     ) -> ModelOutput:
-        """Generate text through Ollama."""
+        """Generate text through Ollama.
 
-        payload: dict[str, Any] = {
-            "model": (options or {}).get("model", self.default_model),
-            "prompt": prompt,
+        Uses ``/api/chat`` when ``tools`` or ``messages`` are provided,
+        otherwise falls back to ``/api/generate`` for backward compatibility.
+        """
+
+        model = (options or {}).get("model", self.default_model)
+        use_chat = bool(tools) or messages is not None
+
+        if not use_chat:
+            payload: dict[str, Any] = {
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "options": options or {},
+            }
+            if format_schema is not None:
+                payload["format"] = format_schema
+            try:
+                response = httpx.post(f"{self.base_url}/api/generate", json=payload, timeout=self.timeout)
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                raise ProviderError(f"Ollama generate failed: {exc}") from exc
+            data = response.json()
+            usage = {
+                "input_tokens": int(data.get("prompt_eval_count") or 0),
+                "output_tokens": int(data.get("eval_count") or 0),
+            }
+            return ModelOutput(text=data.get("response", ""), raw=data, token_usage=usage)
+
+        chat_messages = messages if messages is not None else [{"role": "user", "content": prompt}]
+        payload = {
+            "model": model,
+            "messages": chat_messages,
             "stream": False,
             "options": options or {},
         }
-        if format_schema is not None:
-            payload["format"] = format_schema
+        if tools:
+            payload["tools"] = tools
         try:
-            response = httpx.post(f"{self.base_url}/api/generate", json=payload, timeout=self.timeout)
+            response = httpx.post(f"{self.base_url}/api/chat", json=payload, timeout=self.timeout)
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            raise ProviderError(f"Ollama generate failed: {exc}") from exc
+            raise ProviderError(f"Ollama chat failed: {exc}") from exc
         data = response.json()
+        message = data.get("message") or {}
         usage = {
             "input_tokens": int(data.get("prompt_eval_count") or 0),
             "output_tokens": int(data.get("eval_count") or 0),
         }
-        return ModelOutput(text=data.get("response", ""), raw=data, token_usage=usage)
+        tool_calls = self._parse_tool_calls(message.get("tool_calls"))
+        return ModelOutput(
+            text=message.get("content", ""),
+            raw=data,
+            token_usage=usage,
+            tool_calls=tool_calls,
+        )
+
+    @staticmethod
+    def _parse_tool_calls(raw: Any) -> list[ToolCallOutput]:
+        """Parse Ollama tool_calls into ToolCallOutput objects."""
+
+        if not raw:
+            return []
+        outputs: list[ToolCallOutput] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            function = item.get("function") or {}
+            name = function.get("name") or item.get("name")
+            if not name:
+                continue
+            arguments = function.get("arguments") or item.get("arguments") or {}
+            if not isinstance(arguments, dict):
+                arguments = {}
+            outputs.append(ToolCallOutput(name=str(name), arguments=arguments))
+        return outputs
 
     def embed(
         self,

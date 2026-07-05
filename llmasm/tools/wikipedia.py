@@ -10,6 +10,7 @@ from llmasm.tools.base import ToolSpec
 
 _SEARCH_URL = "https://en.wikipedia.org/w/api.php"
 _TIMEOUT = 10.0
+_USER_AGENT = "llmasm/0.1 (llmasm-tool)"
 
 
 class WikipediaTool:
@@ -47,7 +48,7 @@ class WikipediaTool:
             "format": "json",
             "srlimit": 3,
         }
-        response = httpx.get(_SEARCH_URL, params=params, timeout=_TIMEOUT)
+        response = httpx.get(_SEARCH_URL, params=params, headers={"User-Agent": _USER_AGENT}, timeout=_TIMEOUT)
         response.raise_for_status()
         data = response.json()
         return list(data.get("query", {}).get("search", []))
@@ -61,7 +62,7 @@ class WikipediaTool:
             "titles": title,
             "format": "json",
         }
-        response = httpx.get(_SEARCH_URL, params=params, timeout=_TIMEOUT)
+        response = httpx.get(_SEARCH_URL, params=params, headers={"User-Agent": _USER_AGENT}, timeout=_TIMEOUT)
         response.raise_for_status()
         pages = response.json().get("query", {}).get("pages", {})
         for page in pages.values():
