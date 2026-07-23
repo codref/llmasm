@@ -34,6 +34,7 @@ from llmasm.graph.validation import (
     validate_schema_refs,
     validate_supported_node_kinds,
     validate_terminal_node,
+    validate_tool_outputs_consumed,
     validate_tools,
 )
 from llmasm.ids import new_id
@@ -48,6 +49,27 @@ _PORT_DIRECTION_SYNONYMS: dict[str, str] = {
     "out": "output",
     "output": "output",
 }
+
+
+def _node_port_schema(node: Node, name: str, direction: str) -> str | None:
+    """Return the schema ref of a named port, or None if undeclared."""
+
+    for port in node.ports:
+        if port.name == name and port.direction == direction:
+            return port.schema_ref
+    return None
+
+
+def _rewrite_port_schema(node: Node, direction: str, old: str, new: str) -> None:
+    """Rewrite a node's schema (and matching ports) from `old` to `new`."""
+
+    if direction == "output" and node.output_schema == old:
+        node.output_schema = new
+    if direction == "input" and node.input_schema == old:
+        node.input_schema = new
+    for port in node.ports:
+        if port.direction == direction and port.schema_ref == old:
+            port.schema_ref = new
 
 
 def _canonical_port_direction(value: str) -> str | None:
@@ -184,6 +206,7 @@ class Compiler:
         issues.extend(validate_supported_node_kinds(graph))
         issues.extend(validate_context_budgets(graph))
         issues.extend(validate_required_ports(graph))
+        issues.extend(validate_tool_outputs_consumed(graph))
         issues.extend(validate_terminal_node(graph))
         issues.extend(validate_acyclic(graph))
         issues.extend(validate_router_nodes(graph))
@@ -320,6 +343,8 @@ class Compiler:
             for edge in canonical_edges
             if edge.from_node in name_to_id and edge.to_node in name_to_id
         ]
+        self._wire_orphaned_tools(nodes, edges, dry_run=dry_run)
+        self._reconcile_final_input_schemas(nodes, edges)
         graph_metadata: dict[str, Any] = {
             **proposal.metadata,
             "intent": proposal.intent,
@@ -338,6 +363,54 @@ class Compiler:
             ),
             issues,
         )
+
+    def _reconcile_final_input_schemas(self, nodes: list[Node], edges: list[TaskEdge]) -> None:
+        """Repair schema mismatches on edges that feed a final node.
+
+        Final node inputs are pinned to 'Summary' during canonicalization, but
+        weak planners often wire a RawText-producing node into them; the runtime
+        final handler accepts any text-bearing input, so reconcile
+        deterministically instead of failing validation:
+
+        - model/compress sources are coerced to emit the final node's input
+          schema (their free-text output is wrapped identically at runtime);
+        - other sources (intent, tool) keep their declared schema and the final
+          node's input schema is adapted to match.
+
+        Edges that name an explicit transform are left for validation to judge.
+        """
+
+        by_id = {node.id: node for node in nodes}
+
+        def mismatch(edge: TaskEdge) -> tuple[Node, Node, str, str] | None:
+            if edge.transform is not None:
+                return None
+            src = by_id.get(edge.from_node_id)
+            dst = by_id.get(edge.to_node_id)
+            if src is None or dst is None or dst.kind != NodeKind.FINAL or src.kind == NodeKind.ROUTER:
+                return None
+            from_schema = _node_port_schema(src, edge.from_port, "output") or src.output_schema
+            to_schema = _node_port_schema(dst, edge.to_port, "input") or dst.input_schema
+            if not from_schema or not to_schema or from_schema == to_schema:
+                return None
+            return src, dst, from_schema, to_schema
+
+        # Pass 1: coerce model/compress sources to the final node's input schema.
+        for edge in edges:
+            found = mismatch(edge)
+            if found is None:
+                continue
+            src, dst, from_schema, to_schema = found
+            if src.kind in {NodeKind.MODEL, NodeKind.COMPRESS}:
+                _rewrite_port_schema(src, "output", from_schema, to_schema)
+
+        # Pass 2: for any remaining mismatch, adapt the final node's input schema.
+        for edge in edges:
+            found = mismatch(edge)
+            if found is None:
+                continue
+            src, dst, from_schema, to_schema = found
+            _rewrite_port_schema(dst, "input", to_schema, from_schema)
 
     def _recover_hallucinated_tool(self, proposed: ProposalNode) -> ProposalNode:
         """Convert a tool node with no registered tool into a generic model node."""
@@ -483,6 +556,77 @@ class Compiler:
                 canonical.append(ProposalEdge(from_node=sinks[-1].name, to_node=final.name))
 
         return canonical
+
+    def _wire_orphaned_tools(
+        self, nodes: list[Node], edges: list[TaskEdge], *, dry_run: bool = False
+    ) -> None:
+        """Connect tool outputs that the planner left as disconnected sinks.
+
+        Weak planners sometimes emit a tool node and a separate
+        ``intent -> model -> final`` chain, so the tool is invoked but its
+        result is never consumed. When the graph is otherwise simple (no routers,
+        exactly one final node, exactly one model node feeding it), add a
+        dedicated input port to that model node and wire the orphaned tool's
+        output to it. This makes the tool result available to the answer
+        synthesis step instead of being silently discarded.
+        """
+
+        if any(node.kind == NodeKind.ROUTER for node in nodes):
+            return
+
+        finals = [node for node in nodes if node.kind == NodeKind.FINAL]
+        if len(finals) != 1:
+            return
+        final = finals[0]
+
+        by_id = {node.id: node for node in nodes}
+        model_feeders = [
+            by_id[edge.from_node_id]
+            for edge in edges
+            if edge.to_node_id == final.id
+            and edge.from_node_id in by_id
+            and by_id[edge.from_node_id].kind == NodeKind.MODEL
+        ]
+        if len(model_feeders) != 1:
+            return
+        model = model_feeders[0]
+
+        outgoing_from = {edge.from_node_id for edge in edges}
+        orphaned_tools = [
+            node
+            for node in nodes
+            if node.kind == NodeKind.TOOL and node.id not in outgoing_from
+        ]
+        if not orphaned_tools:
+            return
+
+        for tool in orphaned_tools:
+            port_name = f"{tool.name}_output"
+            if any(port.name == port_name for port in model.ports):
+                continue
+
+            tool_output_schema = tool.output_schema or "RawText"
+            model.ports.append(
+                Port(
+                    node_id=model.id,
+                    name=port_name,
+                    direction="input",
+                    schema_ref=tool_output_schema,
+                )
+            )
+
+            edges.append(
+                TaskEdge(
+                    id=f"edge_{tool.name}_{model.name}_tool_output" if dry_run else new_id("edge"),
+                    workspace_graph_id=model.workspace_graph_id,
+                    task_graph_id=model.task_graph_id,
+                    from_node_id=tool.id,
+                    from_port="output",
+                    to_node_id=model.id,
+                    to_port=port_name,
+                    required=True,
+                )
+            )
 
     def _single_node(self, nodes: list[ProposalNode], kind: NodeKind) -> ProposalNode | None:
         matching = [node for node in nodes if node.kind == kind]

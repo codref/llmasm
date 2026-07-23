@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from llmasm.compiler.proposal import TaskGraphProposal
-from llmasm.graph.models import NodeKind, TaskGraph, WorkspaceEdgeType
+from llmasm.graph.models import NodeKind, TaskEdge, TaskGraph, WorkspaceEdgeType
 from llmasm.graph.registry import SchemaRegistry
 from llmasm.graph.transforms import TransformRegistry
 from llmasm.providers.base import ModelInfo
@@ -73,6 +73,51 @@ def validate_schema_refs(task_graph: TaskGraph, schemas: SchemaRegistry) -> list
         for port in node.ports:
             if not schemas.has(port.schema_ref):
                 issues.append(ValidationIssue("UNKNOWN_SCHEMA", node.name, f"Unknown schema {port.schema_ref}"))
+    return issues
+
+
+def validate_tool_outputs_consumed(task_graph: TaskGraph) -> list[ValidationIssue]:
+    """Validate tool node outputs are wired to a downstream consumer.
+
+    A tool node whose output is never used wastes the tool call and often
+    indicates a planner wiring mistake (e.g. intent -> tool and intent -> model
+    -> final, with the tool left as a disconnected sink).
+    """
+
+    issues: list[ValidationIssue] = []
+    nodes_by_id = {node.id: node for node in task_graph.nodes}
+    outgoing_by_node: dict[str, list[TaskEdge]] = {node.id: [] for node in task_graph.nodes}
+    for edge in task_graph.task_edges:
+        outgoing_by_node.setdefault(edge.from_node_id, []).append(edge)
+
+    consumable_kinds = {NodeKind.MODEL, NodeKind.COMPRESS, NodeKind.FINAL}
+    for node in task_graph.nodes:
+        if node.kind != NodeKind.TOOL:
+            continue
+        outgoing = outgoing_by_node.get(node.id, [])
+        if not outgoing:
+            issues.append(
+                ValidationIssue(
+                    "TOOL_OUTPUT_UNCONSUMED",
+                    node.name,
+                    f"Tool node '{node.name}' has no outgoing edges; its output is never used",
+                )
+            )
+            continue
+        consumed = False
+        for edge in outgoing:
+            target = nodes_by_id.get(edge.to_node_id)
+            if target is not None and target.kind in consumable_kinds:
+                consumed = True
+                break
+        if not consumed:
+            issues.append(
+                ValidationIssue(
+                    "TOOL_OUTPUT_UNCONSUMED",
+                    node.name,
+                    f"Tool node '{node.name}' output is not connected to a model, compress, or final node",
+                )
+            )
     return issues
 
 

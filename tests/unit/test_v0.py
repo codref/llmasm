@@ -8,17 +8,18 @@ from pydantic import BaseModel
 from llmasm.api import LLMASM
 from llmasm.analysis.visualize import to_dot, to_mermaid, to_viewer_graph
 from llmasm.compiler.parser import parse_task_graph_proposal
+from llmasm.compiler.prompt import render_planner_prompt
 from llmasm.config import RuntimeConfig
 from llmasm.goals.classifier import classify_goal_action, classify_goal_action_llm
 from llmasm.runtime.context import filter_context_with_llm
 from llmasm.storage.base import ContextItem
-from llmasm.graph.models import Goal, MemoryItem, Node, NodeKind, Run, RunStatus, TaskGraph, WorkspaceGraph
+from llmasm.graph.models import Goal, GoalAction, MemoryItem, Node, NodeKind, Port, Run, RunStatus, TaskEdge, TaskGraph, WorkspaceGraph
 from llmasm.graph.registry import default_schema_registry
 from llmasm.graph.transforms import default_transform_registry
-from llmasm.graph.validation import validate_required_ports, validate_tools
+from llmasm.graph.validation import validate_required_ports, validate_tool_outputs_consumed, validate_tools
 from llmasm.ids import new_id
 from llmasm.runtime.executor import Executor
-from llmasm.schemas import ConversationRecord, ConversationText, FinalAnswer, RawText
+from llmasm.schemas import ConversationRecord, ConversationText, FinalAnswer, RawText, WeatherObservation
 from llmasm.storage.embeddings import InMemoryEmbeddingStore, NullEmbeddingStore, embed_and_persist
 from llmasm.tools.base import ToolSpec
 from llmasm.storage.memory import InMemoryStorage
@@ -37,6 +38,24 @@ class RawSearchTool:
 
     def invoke(self, input: BaseModel) -> BaseModel:
         return input
+
+
+class FakeWeatherTool:
+    """Deterministic weather tool for tests."""
+
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="weather.lookup",
+            description="Get current weather",
+            input_schema="RawText",
+            output_schema="WeatherObservation",
+        )
+
+    def invoke(self, input: BaseModel) -> BaseModel:
+        return WeatherObservation(
+            condition="Turin: 22°C, clear sky, wind 5 km/h",
+            source_url="https://open-meteo.com/en/weather/turin",
+        )
 
 
 def test_import_and_ids() -> None:
@@ -391,7 +410,131 @@ def test_compiler_synthesizes_simple_qa_chain_edges() -> None:
     task_graph_id = app.compile(workspace_id, "search raw text and summarize it")
     graph = storage.load_task_graph(task_graph_id)
 
-    assert len(graph.task_edges) == 3
+    # Compiler synthesizes edges for all nodes and also wires the orphaned tool
+    # output into the model so the tool result is not wasted.
+    assert len(graph.task_edges) == 4
+    tool_node = next(node for node in graph.nodes if node.kind == NodeKind.TOOL)
+    model_node = next(node for node in graph.nodes if node.kind == NodeKind.MODEL)
+    final_node = next(node for node in graph.nodes if node.kind == NodeKind.FINAL)
+    tool_to_model = [
+        edge
+        for edge in graph.task_edges
+        if edge.from_node_id == tool_node.id and edge.to_node_id == model_node.id
+    ]
+    model_to_final = [
+        edge
+        for edge in graph.task_edges
+        if edge.from_node_id == model_node.id and edge.to_node_id == final_node.id
+    ]
+    assert tool_to_model
+    assert model_to_final
+
+
+def test_compiler_reconciles_model_rawtext_output_into_final() -> None:
+    """A model node emitting RawText wired into a final node must not fail validation."""
+
+    schemas = default_schema_registry()
+    tools = ToolRegistry(schemas)
+    provider = FakeProvider(
+        [
+            """
+{
+  "intent": "compute factorial",
+  "goal_action": "new",
+  "nodes": [
+    {
+      "name": "intent",
+      "kind": "intent",
+      "output_schema": "RawText",
+      "metadata": {"output": {"text": "give me the factorial of 1234"}}
+    },
+    {
+      "name": "compute_factorial",
+      "kind": "model",
+      "input_schema": "RawText",
+      "output_schema": "RawText",
+      "execution": {"model": "fake-model"},
+      "metadata": {"instruction": "Compute the factorial of 1234"}
+    },
+    {
+      "name": "final_answer",
+      "kind": "final",
+      "input_schema": "Summary",
+      "output_schema": "FinalAnswer"
+    }
+  ],
+  "edges": [
+    {"from_node": "intent", "to_node": "compute_factorial"},
+    {"from_node": "compute_factorial", "to_node": "final_answer"}
+  ]
+}
+"""
+        ],
+        model_text="A very large number.",
+    )
+    storage = InMemoryStorage()
+    app = LLMASM(storage=storage, provider=provider, tool_registry=tools, schema_registry=schemas)
+    workspace_id = app.create_workspace("test")
+
+    # A single planner output is provided; success implies no repair attempt was needed.
+    answer = app.ask(workspace_id, "give me the factorial of 1234")
+
+    assert answer == FinalAnswer(text="A very large number.", sources=[])
+    graph = storage.load_task_graph(next(iter(storage.runs.values())).task_graph_id)
+    model_node = next(node for node in graph.nodes if node.kind == NodeKind.MODEL)
+    final = next(node for node in graph.nodes if node.kind == NodeKind.FINAL)
+    assert model_node.output_schema == "Summary"
+    assert final.input_schema == "Summary"
+
+
+def test_compiler_adapts_final_input_for_tool_output() -> None:
+    """A tool wired directly into a final node adapts the final input schema."""
+
+    schemas = default_schema_registry()
+    tools = ToolRegistry(schemas)
+    tools.register(RawSearchTool())
+    provider = FakeProvider(
+        [
+            """
+{
+  "intent": "search raw text",
+  "goal_action": "new",
+  "nodes": [
+    {
+      "name": "intent",
+      "kind": "intent",
+      "output_schema": "RawText",
+      "metadata": {"output.text": "xyz"}
+    },
+    {
+      "name": "raw.search",
+      "kind": "tool"
+    },
+    {
+      "name": "final",
+      "kind": "final"
+    }
+  ],
+  "edges": [
+    {"from_node": "intent", "to_node": "raw.search"},
+    {"from_node": "raw.search", "to_node": "final"}
+  ]
+}
+"""
+        ],
+        model_text="unused",
+    )
+    storage = InMemoryStorage()
+    app = LLMASM(storage=storage, provider=provider, tool_registry=tools, schema_registry=schemas)
+    workspace_id = app.create_workspace("test")
+
+    answer = app.ask(workspace_id, "search raw text")
+
+    assert answer.text == "xyz"
+    graph = storage.load_task_graph(next(iter(storage.runs.values())).task_graph_id)
+    final = next(node for node in graph.nodes if node.kind == NodeKind.FINAL)
+    assert final.input_schema == "RawText"
+    assert final.output_schema == "FinalAnswer"
 
 
 def test_compiler_repair_persists_failure() -> None:
@@ -422,6 +565,275 @@ def test_tool_cache_reuses_artifact_without_invocation() -> None:
     app.run(task_graph_id)
 
     assert retriever.calls == 1
+
+
+def test_validate_tool_outputs_consumed_rejects_orphaned_tool() -> None:
+    """A tool node whose output is never used must be flagged."""
+
+    graph = TaskGraph(
+        id="taskgraph_1",
+        workspace_graph_id="workspace_1",
+        nodes=[
+            Node(
+                id="node_intent",
+                workspace_graph_id="workspace_1",
+                task_graph_id="taskgraph_1",
+                kind=NodeKind.INTENT,
+                name="intent",
+                output_schema="RawText",
+                ports=[Port(node_id="node_intent", name="output", direction="output", schema_ref="RawText")],
+            ),
+            Node(
+                id="node_tool",
+                workspace_graph_id="workspace_1",
+                task_graph_id="taskgraph_1",
+                kind=NodeKind.TOOL,
+                name="tool",
+                input_schema="RawText",
+                output_schema="RawText",
+                execution={"tool": "raw.search"},
+                ports=[
+                    Port(node_id="node_tool", name="input", direction="input", schema_ref="RawText"),
+                    Port(node_id="node_tool", name="output", direction="output", schema_ref="RawText"),
+                ],
+            ),
+            Node(
+                id="node_model",
+                workspace_graph_id="workspace_1",
+                task_graph_id="taskgraph_1",
+                kind=NodeKind.MODEL,
+                name="model",
+                input_schema="RawText",
+                output_schema="Summary",
+                ports=[
+                    Port(node_id="node_model", name="input", direction="input", schema_ref="RawText"),
+                    Port(node_id="node_model", name="output", direction="output", schema_ref="Summary"),
+                ],
+            ),
+            Node(
+                id="node_final",
+                workspace_graph_id="workspace_1",
+                task_graph_id="taskgraph_1",
+                kind=NodeKind.FINAL,
+                name="final",
+                input_schema="Summary",
+                output_schema="FinalAnswer",
+                ports=[
+                    Port(node_id="node_final", name="input", direction="input", schema_ref="Summary"),
+                    Port(node_id="node_final", name="output", direction="output", schema_ref="FinalAnswer"),
+                ],
+            ),
+        ],
+        task_edges=[
+            TaskEdge(
+                id="edge_1",
+                workspace_graph_id="workspace_1",
+                task_graph_id="taskgraph_1",
+                from_node_id="node_intent",
+                from_port="output",
+                to_node_id="node_tool",
+                to_port="input",
+            ),
+            TaskEdge(
+                id="edge_2",
+                workspace_graph_id="workspace_1",
+                task_graph_id="taskgraph_1",
+                from_node_id="node_intent",
+                from_port="output",
+                to_node_id="node_model",
+                to_port="input",
+            ),
+            TaskEdge(
+                id="edge_3",
+                workspace_graph_id="workspace_1",
+                task_graph_id="taskgraph_1",
+                from_node_id="node_model",
+                from_port="output",
+                to_node_id="node_final",
+                to_port="input",
+            ),
+        ],
+    )
+    issues = validate_tool_outputs_consumed(graph)
+    assert any(issue.code == "TOOL_OUTPUT_UNCONSUMED" for issue in issues)
+
+
+def test_compiler_wires_orphaned_tool_output_into_answer_model() -> None:
+    """A weak planner that leaves a tool as a sink gets its output wired to the model."""
+
+    schemas = default_schema_registry()
+    tools = ToolRegistry(schemas)
+    tools.register(RawSearchTool())
+    provider = FakeProvider(
+        [
+            """
+{
+  "intent": "weather in turin",
+  "goal_action": "new",
+  "nodes": [
+    {"name": "intent", "kind": "intent", "output_schema": "RawText", "metadata": {"output": {"text": "weather in turin"}}},
+    {"name": "weather_tool", "kind": "tool", "execution": {"tool": "raw.search"}, "input_schema": "RawText", "output_schema": "RawText"},
+    {"name": "answer_model", "kind": "model", "input_schema": "RawText", "output_schema": "Summary", "execution": {"model": "fake-model"}, "metadata": {"instruction": "Answer the weather question"}},
+    {"name": "final", "kind": "final"}
+  ],
+  "edges": [
+    {"from_node": "intent", "to_node": "answer_model"},
+    {"from_node": "answer_model", "to_node": "final"},
+    {"from_node": "intent", "to_node": "weather_tool"}
+  ]
+}
+"""
+        ],
+        model_text="It is sunny.",
+    )
+    storage = InMemoryStorage()
+    app = LLMASM(storage=storage, provider=provider, tool_registry=tools, schema_registry=schemas)
+    workspace_id = app.create_workspace("test")
+    task_graph_id = app.compile(workspace_id, "weather in turin")
+    graph = storage.load_task_graph(task_graph_id)
+
+    tool_node = next(node for node in graph.nodes if node.kind == NodeKind.TOOL)
+    model_node = next(node for node in graph.nodes if node.kind == NodeKind.MODEL)
+    edges_from_tool = [edge for edge in graph.task_edges if edge.from_node_id == tool_node.id]
+    assert len(edges_from_tool) == 1
+    assert edges_from_tool[0].to_node_id == model_node.id
+    assert edges_from_tool[0].to_port == "weather_tool_output"
+    assert any(port.name == "weather_tool_output" and port.direction == "input" for port in model_node.ports)
+
+
+def test_end_to_end_ask_with_orphaned_tool_uses_tool_result() -> None:
+    """The full ask pipeline should use the tool output even when the planner omits the wiring."""
+
+    schemas = default_schema_registry()
+    tools = ToolRegistry(schemas)
+    tools.register(RawSearchTool())
+    provider = FakeProvider(
+        [
+            """
+{
+  "intent": "weather in turin",
+  "goal_action": "new",
+  "nodes": [
+    {"name": "intent", "kind": "intent", "output_schema": "RawText", "metadata": {"output": {"text": "weather in turin"}}},
+    {"name": "search_tool", "kind": "tool", "execution": {"tool": "raw.search"}, "input_schema": "RawText", "output_schema": "RawText"},
+    {"name": "answer", "kind": "model", "input_schema": "RawText", "output_schema": "Summary", "execution": {"model": "fake-model"}, "metadata": {"instruction": "Summarize the weather"}},
+    {"name": "final", "kind": "final"}
+  ],
+  "edges": [
+    {"from_node": "intent", "to_node": "answer"},
+    {"from_node": "answer", "to_node": "final"},
+    {"from_node": "intent", "to_node": "search_tool"}
+  ]
+}
+"""
+        ],
+        model_text="Sunny and warm.",
+    )
+    storage = InMemoryStorage()
+    app = LLMASM(storage=storage, provider=provider, tool_registry=tools, schema_registry=schemas)
+    workspace_id = app.create_workspace("test")
+    answer = app.ask(workspace_id, "weather in turin")
+    assert "Sunny and warm" in answer.text
+
+
+def test_model_prompt_directs_model_to_use_tool_results() -> None:
+    """Model nodes that receive tool output get a directive and natural-language formatting."""
+
+    schemas = default_schema_registry()
+    tools = ToolRegistry(schemas)
+    tools.register(FakeWeatherTool())
+    provider = FakeProvider(
+        [
+            """
+{
+  "intent": "weather in turin",
+  "goal_action": "new",
+  "nodes": [
+    {"name": "intent", "kind": "intent", "output_schema": "RawText", "metadata": {"output": {"text": "what's the weather in turin?"}}},
+    {"name": "weather_lookup", "kind": "tool", "execution": {"tool": "weather.lookup"}, "input_schema": "RawText", "output_schema": "WeatherObservation"},
+    {"name": "weather_response", "kind": "model", "input_schema": "WeatherObservation", "output_schema": "Summary", "execution": {"model": "fake-model"}, "metadata": {"instruction": "Answer the weather question"}},
+    {"name": "final", "kind": "final"}
+  ],
+  "edges": [
+    {"from_node": "intent", "to_node": "weather_lookup"},
+    {"from_node": "weather_lookup", "to_node": "weather_response"},
+    {"from_node": "weather_response", "to_node": "final"}
+  ]
+}
+"""
+        ],
+        model_text="It is sunny in Turin.",
+    )
+    storage = InMemoryStorage()
+    app = LLMASM(storage=storage, provider=provider, tool_registry=tools, schema_registry=schemas)
+    workspace_id = app.create_workspace("test")
+    answer = app.ask(workspace_id, "what's the weather in turin?")
+    assert "sunny" in answer.text.lower()
+
+    # Inspect the prompt sent to the model node.
+    assert provider.generate_prompts
+    last_prompt = provider.generate_prompts[-1]
+    assert "Base your answer directly on those tool result(s)" in last_prompt
+    assert "Current weather: Turin:" in last_prompt
+    assert "clear sky, wind 5 km/h" in last_prompt
+
+
+def test_planner_prompt_includes_tool_input_extraction_rule() -> None:
+    """The planner prompt should tell the model to extract clean entities before tool calls."""
+
+    schemas = default_schema_registry()
+    tools = ToolRegistry(schemas)
+    tools.register(FakeWeatherTool())
+    prompt = render_planner_prompt(
+        schema_registry=schemas,
+        tool_registry=tools,
+        models=[],
+        active_goal=None,
+        goal_action=GoalAction.NEW,
+        prior_context=[],
+        user_prompt="what's the weather in turin?",
+        runtime_config=RuntimeConfig(),
+    )
+    assert "extracts just that entity" in prompt
+    assert "weather.lookup" in prompt
+    assert "calculator.eval" in prompt or "file.read" in prompt or "wikipedia.search" in prompt
+
+
+def test_compiler_accepts_extraction_model_node_before_tool() -> None:
+    """A proposal that extracts the city name before calling weather.lookup should execute successfully."""
+
+    schemas = default_schema_registry()
+    tools = ToolRegistry(schemas)
+    tools.register(FakeWeatherTool())
+    provider = FakeProvider(
+        [
+            """
+{
+  "intent": "weather in turin",
+  "goal_action": "new",
+  "nodes": [
+    {"name": "intent", "kind": "intent", "output_schema": "RawText", "metadata": {"output": {"text": "what's the weather in turin?"}}},
+    {"name": "extract_city", "kind": "model", "input_schema": "RawText", "output_schema": "RawText", "execution": {"model": "fake-model"}, "metadata": {"instruction": "Extract only the city name from the user prompt. Output just the city name, no punctuation, no explanation."}},
+    {"name": "weather_lookup", "kind": "tool", "execution": {"tool": "weather.lookup"}, "input_schema": "RawText", "output_schema": "WeatherObservation"},
+    {"name": "weather_response", "kind": "model", "input_schema": "WeatherObservation", "output_schema": "Summary", "execution": {"model": "fake-model"}, "metadata": {"instruction": "Answer the weather question"}},
+    {"name": "final", "kind": "final"}
+  ],
+  "edges": [
+    {"from_node": "intent", "to_node": "extract_city"},
+    {"from_node": "extract_city", "to_node": "weather_lookup"},
+    {"from_node": "weather_lookup", "to_node": "weather_response"},
+    {"from_node": "weather_response", "to_node": "final"}
+  ]
+}
+"""
+        ],
+        model_text="It is sunny in Turin.",
+    )
+    storage = InMemoryStorage()
+    app = LLMASM(storage=storage, provider=provider, tool_registry=tools, schema_registry=schemas)
+    workspace_id = app.create_workspace("test")
+    answer = app.ask(workspace_id, "what's the weather in turin?")
+    assert "sunny" in answer.text.lower()
 
 
 def test_embeddings_lifecycle() -> None:

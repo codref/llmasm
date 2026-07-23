@@ -32,7 +32,16 @@ from llmasm.providers.base import LLMProvider, ModelOutput
 from llmasm.runtime.context import select_context
 from llmasm.runtime.expansion import ExpansionRequest, apply_expansion
 from llmasm.runtime.scheduler import Scheduler
-from llmasm.schemas import FinalAnswer, NotFound, RawText, RoutingDecision, Summary, ToolCallRequest, ToolCallResult
+from llmasm.schemas import (
+    FinalAnswer,
+    NotFound,
+    RawText,
+    RoutingDecision,
+    Summary,
+    ToolCallRequest,
+    ToolCallResult,
+    WeatherObservation,
+)
 from llmasm.storage.base import ContextItem, Storage
 from llmasm.storage.embeddings import EmbeddingStore, NullEmbeddingStore, embed_and_persist
 from llmasm.tools.registry import ToolRegistry
@@ -123,7 +132,7 @@ class Executor:
         state.status = NodeStatus.RUNNING
         state.attempts += 1
         self.storage.update_run_node_state(state)
-        direct_inputs, input_artifact_ids = self._gather_inputs(run, node)
+        direct_inputs, input_artifact_ids, tool_input_ports = self._gather_inputs(run, node)
         allow_cache = self._allow_cache(node)
         cache_key = self._cache_key(node)
         if allow_cache:
@@ -134,7 +143,7 @@ class Executor:
                 self.storage.persist_artifact(artifact)
                 self._mark_succeeded(run, node, [artifact.id], {"cache_hit": True})
                 return
-        output = self._invoke(run, node, direct_inputs)
+        output = self._invoke(run, node, direct_inputs, tool_input_ports=tool_input_ports)
         output_port = node.output_port_name()
         artifact = Artifact(
             id=new_id("artifact"),
@@ -163,7 +172,13 @@ class Executor:
             metadata["selected_branch"] = output.selected_branch
         self._mark_succeeded(run, node, [artifact.id], metadata)
 
-    def _invoke(self, run: Run, node: Node, direct_inputs: dict[str, BaseModel]) -> BaseModel:
+    def _invoke(
+        self,
+        run: Run,
+        node: Node,
+        direct_inputs: dict[str, BaseModel],
+        tool_input_ports: set[str] | None = None,
+    ) -> BaseModel:
         if node.kind == NodeKind.INTENT:
             payload = node.execution.get("output") or node.metadata.get("output") or node.metadata
             if node.output_schema == "RawText":
@@ -193,7 +208,7 @@ class Executor:
             )
             return output
         if node.kind in {NodeKind.MODEL, NodeKind.COMPRESS}:
-            return self._invoke_model_node(run, node, direct_inputs)
+            return self._invoke_model_node(run, node, direct_inputs, tool_input_ports=tool_input_ports)
 
         if node.kind == NodeKind.FINAL:
             input_value = next(iter(direct_inputs.values()), RawText(text=""))
@@ -222,7 +237,13 @@ class Executor:
             raise ExecutionError(f"Unsupported node kind in v0: {node.kind.value}")
         raise ExecutionError(f"Unsupported node kind in v0: {node.kind.value}")
 
-    def _invoke_model_node(self, run: Run, node: Node, direct_inputs: dict[str, BaseModel]) -> BaseModel:
+    def _invoke_model_node(
+        self,
+        run: Run,
+        node: Node,
+        direct_inputs: dict[str, BaseModel],
+        tool_input_ports: set[str] | None = None,
+    ) -> BaseModel:
         """Execute a model or compress node, optionally with tool use."""
 
         selected = select_context(
@@ -234,7 +255,9 @@ class Executor:
             embedding_store=self.embedding_store,
             provider=self.provider,
         )
-        prompt = self._render_node_prompt(node, selected.direct_inputs, selected.items)
+        prompt = self._render_node_prompt(
+            node, selected.direct_inputs, selected.items, tool_input_ports=tool_input_ports
+        )
         prompt_artifact = Artifact(
             id=new_id("artifact"),
             run_id=run.id,
@@ -484,11 +507,14 @@ class Executor:
         )
         return decision  # type: ignore[return-value]
 
-    def _gather_inputs(self, run: Run, node: Node) -> tuple[dict[str, BaseModel], list[str]]:
+    def _gather_inputs(
+        self, run: Run, node: Node
+    ) -> tuple[dict[str, BaseModel], list[str], set[str]]:
         graph = self.storage.load_task_graph(run.task_graph_id)
         edges = [edge for edge in self.storage.list_task_edges(graph.id) if edge.to_node_id == node.id]
         direct: dict[str, BaseModel] = {}
         input_ids: list[str] = []
+        tool_input_ports: set[str] = set()
         states = {state.node_id: state for state in self.storage.list_run_node_states(run.id)}
         nodes_by_id = {n.id: n for n in graph.nodes}
         for edge in edges:
@@ -514,7 +540,9 @@ class Executor:
             if edge.transform:
                 value = self.transform_registry.apply(edge.transform, value, edge.metadata)
             direct[edge.to_port] = value
-        return direct, input_ids
+            if from_node and from_node.kind == NodeKind.TOOL:
+                tool_input_ports.add(edge.to_port)
+        return direct, input_ids, tool_input_ports
 
     def _artifact_to_model(self, schema_ref: str | None, content: Any) -> BaseModel:
         model = self._model_for_schema(schema_ref)
@@ -577,6 +605,7 @@ class Executor:
         node: Node,
         direct_inputs: dict[str, BaseModel],
         context_items: list[ContextItem] | None = None,
+        tool_input_ports: set[str] | None = None,
     ) -> str:
         instruction = (
             node.metadata.get("instruction")
@@ -610,11 +639,36 @@ class Executor:
                     f"If the context does not contain the answer, you may use your own knowledge. "
                     f"{focus_clause}"
                 )
+
+        tool_input_ports = tool_input_ports or set()
+        if tool_input_ports:
+            tool_names = ", ".join(sorted(tool_input_ports))
+            instruction = (
+                f"{instruction}\n\n"
+                f"You are given tool result(s) in the inputs above ({tool_names}). "
+                f"Base your answer directly on those tool result(s). "
+                f"Do not say you lack the information and do not ask the user to provide it."
+            )
+
         payload: dict[str, Any] = {
             "instruction": instruction,
-            "inputs": {name: value.model_dump(mode="json") for name, value in sorted(direct_inputs.items())},
+            "inputs": {name: self._format_model_input_value(value) for name, value in sorted(direct_inputs.items())},
         }
         return json.dumps(payload, sort_keys=True)
+
+    @staticmethod
+    def _format_model_input_value(value: BaseModel) -> str:
+        """Render a structured input as natural-language text for the model prompt."""
+
+        if isinstance(value, RawText):
+            return value.text
+        if isinstance(value, WeatherObservation):
+            parts = [f"Current weather: {value.condition}"]
+            if value.source_url:
+                parts.append(f"Source: {value.source_url}")
+            return "\n".join(parts)
+        # Fallback: compact JSON for schemas the runtime does not specialize.
+        return json.dumps(value.model_dump(mode="json"), sort_keys=True)
 
     def _ensure_node_states(self, run: Run, nodes: list[Node]) -> None:
         existing = {state.node_id for state in self.storage.list_run_node_states(run.id)}
